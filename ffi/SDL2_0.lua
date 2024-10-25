@@ -20,13 +20,7 @@ require("ffi/linux_input_h")
 
 -----------------------------------------------------------------
 
-local SDL = util.ffiLoadCandidates{
-    "SDL2",
-    -- this unfortunately needs to be written in full due to the . in the name
-    "libSDL2-2.0.so",
-    "libSDL2-2.0.so.0",
-    util.KO_DYLD_PREFIX .. "/lib/libSDL2.dylib",
-}
+local SDL = util.loadSDL2()
 
 -- Some features (like SDL_GameControllerRumble) may require a minimum version
 -- of SDL. These helper functions allow us to prevent any issues with calling
@@ -129,6 +123,10 @@ function S.open(w, h, x, y)
         SDL.SDL_SetHint("SDL_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR", "0")
     end
 
+    -- Disable TextInput until we enable it.
+    -- Also see <https://github.com/slouken/SDL/commit/c0f9a3d814a815ec6e2822d7fd2e8648df79f7b9>.
+    S.stopTextInput()
+
     -- set up screen (window)
     local pos_x = tonumber(os.getenv("KOREADER_WINDOW_POS_X")) or x or SDL.SDL_WINDOWPOS_UNDEFINED
     local pos_y = tonumber(os.getenv("KOREADER_WINDOW_POS_Y")) or y or SDL.SDL_WINDOWPOS_UNDEFINED
@@ -141,7 +139,7 @@ function S.open(w, h, x, y)
     -- What's even more curious is that we still only get a single SDL_WINDOWEVENT_MOVED on startup, except that way it's at the requested coordinates...
     SDL.SDL_SetWindowPosition(S.screen, pos_x, pos_y)
 
-    S.renderer = ffi.gc(SDL.SDL_CreateRenderer(S.screen, -1, 0), SDL.SDL_DestroyRenderer)
+    S.renderer = SDL.SDL_CreateRenderer(S.screen, -1, 0)
     local output_w = ffi.new("int[1]", 0)
     local output_h = ffi.new("int[1]", 0)
     if SDL.SDL_GetRendererOutputSize(S.renderer, output_w, output_h) == 0 and tonumber(output_w[0]) ~= w then
@@ -473,6 +471,9 @@ function S.waitForEvent(sec, usec)
         elseif button == SDL.SDL_CONTROLLER_BUTTON_B then
             -- send escape
             genEmuEvent(C.EV_KEY, 27, 1)
+        elseif button == SDL.SDL_CONTROLLER_BUTTON_Y then
+            -- send ContextMenu
+            genEmuEvent(C.EV_KEY, 1073741925, 1)
         -- left bumper
         elseif button == SDL.SDL_CONTROLLER_BUTTON_BACK then
             -- send page up
@@ -485,6 +486,18 @@ function S.waitForEvent(sec, usec)
         elseif button == SDL.SDL_CONTROLLER_BUTTON_START or button == SDL.SDL_CONTROLLER_BUTTON_LEFTSTICK then
             -- send F1 (bound to menu in front at the time of writing)
             genEmuEvent(C.EV_KEY, 1073741882, 1)
+        elseif button == SDL.SDL_CONTROLLER_BUTTON_DPAD_UP then
+            -- send up
+            genEmuEvent(C.EV_KEY, 1073741906, 1)
+        elseif button == SDL.SDL_CONTROLLER_BUTTON_DPAD_DOWN then
+            -- send down
+            genEmuEvent(C.EV_KEY, 1073741905, 1)
+        elseif button == SDL.SDL_CONTROLLER_BUTTON_DPAD_LEFT then
+            -- send left
+            genEmuEvent(C.EV_KEY, 1073741904, 1)
+        elseif button == SDL.SDL_CONTROLLER_BUTTON_DPAD_RIGHT then
+            -- send right
+            genEmuEvent(C.EV_KEY, 1073741903, 1)
         end
     --- D-pad ---
     elseif event.type == SDL.SDL_JOYHATMOTION then

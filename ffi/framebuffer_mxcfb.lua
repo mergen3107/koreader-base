@@ -2,29 +2,13 @@ local bit = require("bit")
 local ffi = require("ffi")
 local lfs = require("libs/libkoreader-lfs")
 local ffiUtil = require("ffi/util")
-local BB = require("ffi/blitbuffer")
 local C = ffi.C
 
 require("ffi/posix_h")
 
 local band = bit.band
 local bor = bit.bor
-local bnot = bit.bnot
 local bxor = bit.bxor
-
--- A couple helper functions to compute aligned values...
--- c.f., <linux/kernel.h> & ffi/framebuffer_linux.lua
-local function ALIGN_DOWN(x, a)
-    -- x & ~(a-1)
-    local mask = a - 1
-    return band(x, bnot(mask))
-end
-
-local function ALIGN_UP(x, a)
-    -- (x + (a-1)) & ~(a-1)
-    local mask = a - 1
-    return band(x + mask, bnot(mask))
-end
 
 local framebuffer = {
     -- pass device object here for proper model detection:
@@ -33,11 +17,16 @@ local framebuffer = {
     mech_poweron = nil,
     mech_wait_update_complete = nil,
     mech_wait_update_submission = nil,
-    waveform_partial = nil,
+    wait_for_submission_before = false,
+    wait_for_submission_after = false,
+    waveform_a2 = nil,
+    waveform_fast = nil,
     waveform_ui = nil,
+    waveform_partial = nil,
     waveform_flashui = nil,
     waveform_full = nil,
-    waveform_fast = nil,
+    waveform_color = nil,
+    waveform_color_reagl = nil,
     waveform_reagl = nil,
     waveform_night = nil,
     waveform_flashnight = nil,
@@ -49,11 +38,17 @@ local framebuffer = {
     dont_wait_for_marker = nil,
     -- Set by frontend to 3 on Pocketbook Color Lux that refreshes based on bytes (not based on pixel)
     refresh_pixel_size = 1,
+    -- Used to enforce an alignment constraint on devices with quirky drivers
+    alignment_constraint = nil,
+    dither_alignment_constraint = 8,
 
     -- We recycle ffi cdata
     marker_data = nil,
     update_data = nil,
     submission_data = nil,
+
+    -- CFA post-processing flag
+    CFA_PROCESSING_FLAG = 0,
 }
 
 --[[ refresh list management: --]]
@@ -71,21 +66,16 @@ end
 
 -- Returns true if waveform_mode arg matches the UI waveform mode for the current device
 -- NOTE: This is to avoid explicit comparison against device-specific waveform constants in mxc_update()
---       Here, it's because of the Kindle-specific WAVEFORM_MODE_GC16_FAST
 function framebuffer:_isUIWaveFormMode(waveform_mode)
     return waveform_mode == self.waveform_ui
 end
 
 -- Returns true if waveform_mode arg matches the FlashUI waveform mode for the current device
--- NOTE: This is to avoid explicit comparison against device-specific waveform constants in mxc_update()
---       Here, it's because of the Kindle-specific WAVEFORM_MODE_GC16_FAST
 function framebuffer:_isFlashUIWaveFormMode(waveform_mode)
     return waveform_mode == self.waveform_flashui
 end
 
 -- Returns true if waveform_mode arg matches the REAGL waveform mode for the current device
--- NOTE: This is to avoid explicit comparison against device-specific waveform constants in mxc_update()
---       Here, it's Kindle's various WAVEFORM_MODE_REAGL vs. Kobo's WAVEFORM_MODE_REAGLD
 function framebuffer:_isREAGLWaveFormMode(waveform_mode)
     return waveform_mode == self.waveform_reagl
 end
@@ -96,20 +86,33 @@ function framebuffer:_isNightREAGL()
 end
 
 -- Returns true if waveform_mode arg matches the partial waveform mode for the current device
--- NOTE: This is to avoid explicit comparison against device-specific waveform constants in mxc_update()
---       Here, because of REAGL or device-specific quirks.
 function framebuffer:_isPartialWaveFormMode(waveform_mode)
     return waveform_mode == self.waveform_partial
 end
 
--- Returns the device-specific nightmode waveform mode
-function framebuffer:_getNightWaveFormMode()
-    return self.waveform_night
+-- Returns true if waveform_mode arg matches the full waveform mode for the current device
+function framebuffer:_isFullWaveFormMode(waveform_mode)
+    return waveform_mode == self.waveform_full
 end
 
--- Returns the device-specific flashing nightmode waveform mode
-function framebuffer:_getFlashNightWaveFormMode()
-    return self.waveform_flashnight
+-- Returns true if waveform_mode arg matches the fast waveform mode for the current device
+function framebuffer:_isFastWaveFormMode(waveform_mode)
+    return waveform_mode == self.waveform_fast
+end
+
+-- Returns true if waveform_mode arg does *NOT* match the A2 or fast waveform mode for the current device
+function framebuffer:_isNotFastWaveFormMode(waveform_mode)
+    return waveform_mode ~= self.waveform_a2 and waveform_mode ~= self.waveform_fast
+end
+
+-- Returns true if waveform_mode arg does *NOT* match the A2 waveform mode for the current device
+function framebuffer:_isNotA2WaveFormMode(waveform_mode)
+    return waveform_mode ~= self.waveform_a2
+end
+
+-- Returns true if waveform_mode arg matches a Kaleido-specific waveform mode for the current device
+function framebuffer:_isKaleidoWaveFormMode(waveform_mode)
+    return waveform_mode == self.waveform_color or waveform_mode == self.waveform_color_reagl
 end
 
 -- Returns true if w & h are equal or larger than our visible screen estate (i.e., we asked for a full-screen update)
@@ -124,30 +127,6 @@ function framebuffer:_isFullScreen(w, h)
     else
         return false
     end
-end
-
--- Clamp w & h to the screen's physical dimensions
-function framebuffer:_clampToPhysicalDim(w, h)
-    -- NOTE: fb:getWidth() & fb:getHeight() return the viewport size, but obey rotation, which means we can't rely on them directly.
-    --       fb:getScreenWidth() & fb:getScreenHeight return the full screen size, without the viewport, and in the default rotation, which doesn't help either.
-    -- Settle for getWidth() & getHeight() w/ rotation handling, like what bb:getPhysicalRect() does...
-    local max_w, max_h
-    if band(self:getRotationMode(), 1) == 1 then
-        max_w = self:getHeight()
-        max_h = self:getWidth()
-    else
-        max_w = self:getWidth()
-        max_h = self:getHeight()
-    end
-
-    if w > max_w then
-        w = max_w
-    end
-    if h > max_h then
-        h = max_h
-    end
-
-    return w, h
 end
 
 --[[ handlers for the power management API of the eink driver --]]
@@ -293,8 +272,16 @@ end
 -- Cervantes MXCFB_SEND_UPDATE == 0x4044462e
 local function mxc_update(fb, ioc_cmd, ioc_data, is_flashing, waveform_mode, x, y, w, h, dither)
     local bb = fb.full_bb or fb.bb
-    w, x = BB.checkBounds(w or bb:getWidth(), x or 0, 0, bb:getWidth(), 0xFFFF)
-    h, y = BB.checkBounds(h or bb:getHeight(), y or 0, 0, bb:getHeight(), 0xFFFF)
+
+    -- NOTE: If we're requesting hardware dithering on a partial update, make sure the rectangle is using
+    --       coordinates aligned to the previous multiple of 8, and dimensions aligned to the next multiple of 8.
+    --       Otherwise, some unlucky coordinates will play badly with the PxP's own alignment constraints,
+    --       leading to a refresh where content appears to have moved a few pixels to the side...
+    --       (Sidebar: this is probably a kernel issue, the EPDC driver is responsible for the alignment fixup,
+    --       c.f., epdc_process_update @ drivers/video/fbdev/mxc/mxc_epdc_v2_fb.c on a Kobo Mk. 7 kernel...).
+    -- And regardless of alignment constraints, make sure the rectangle is strictly bounded inside the screen.
+    x, y, w, h = bb:getBoundedRect(x, y, w, h, dither and fb.dither_alignment_constraint or fb.alignment_constraint)
+    -- The ioctl operates in the native rotation, so, make sure we rotate the rectangle as needed
     x, y, w, h = bb:getPhysicalRect(x, y, w, h)
 
     -- NOTE: Discard empty or bogus regions, as they might murder some kernels with extreme prejudice...
@@ -320,41 +307,20 @@ local function mxc_update(fb, ioc_cmd, ioc_data, is_flashing, waveform_mode, x, 
         fb:mech_poweron()
     end
 
-    -- NOTE: If we're requesting hardware dithering on a partial update, make sure the rectangle is using
-    --       coordinates aligned to the previous multiple of 8, and dimensions aligned to the next multiple of 8.
-    --       Otherwise, some unlucky coordinates will play badly with the PxP's own alignment constraints,
-    --       leading to a refresh where content appears to have moved a few pixels to the side...
-    --       (Sidebar: this is probably a kernel issue, the EPDC driver is responsible for the alignment fixup,
-    --       c.f., epdc_process_update @ drivers/video/fbdev/mxc/mxc_epdc_v2_fb.c on a Kobo Mk. 7 kernel...).
-    if dither then
-        local x_orig = x
-        x = ALIGN_DOWN(x_orig, 8)
-        local x_fixup = x_orig - x
-        w = ALIGN_UP(w + x_fixup, 8)
-        local y_orig = y
-        y = ALIGN_DOWN(y_orig, 8)
-        local y_fixup = y_orig - y
-        h = ALIGN_UP(h + y_fixup, 8)
-
-        -- NOTE: The Forma is the rare beast with screen dimensions that are themselves a multiple of 8.
-        --       Unfortunately, this may not be true for every device, so,
-        --       make sure we clamp w & h to the physical screen's size, otherwise the ioctl will fail ;).
-        w, h = fb:_clampToPhysicalDim(w, h)
-    end
-
     w = w * fb.refresh_pixel_size
 
     -- NOTE: If we're trying to send a:
     --         * true FULL update,
     --         * GC16_FAST update (i.e., popping-up a menu),
     --       then wait for submission of previous marker first.
+    -- NOTE: This is mainly used on Kindles
     local marker = fb.marker
     -- NOTE: Technically, we might not always want to wait for *exactly* the previous marker
     --       (we might actually want the one before that), but in the vast majority of cases, that's good enough,
     --       and saves us a lot of annoying and hard-to-get-right heuristics anyway ;).
     -- Make sure it's a valid marker, to avoid doing something stupid on our first update.
     -- Also make sure we haven't already waited on this marker ;).
-    if fb.mech_wait_update_submission
+    if fb.wait_for_submission_before
       and (is_flashing or fb:_isUIWaveFormMode(waveform_mode))
       and (marker ~= 0 and marker ~= fb.dont_wait_for_marker) then
         fb.debug("refresh: wait for submission of (previous) marker", marker)
@@ -393,6 +359,32 @@ local function mxc_update(fb, ioc_cmd, ioc_data, is_flashing, waveform_mode, x, 
     marker = fb:_get_next_marker()
     ioc_data.update_marker = marker
 
+    -- Handle promotion to Kaleido waveform modes.
+    -- We assume the dither flag is only set on image content, so we rely on that as our main trigger.
+    -- REAGL (via partial) => GLRC16
+    -- GC16  (via full)    => GCC16
+    -- NOTE: That leaves ui & flashui alone, which suits us just fine in order not to affect and slow down the FM,
+    --       while still making manual flashing refreshes via diagonal swipes automatically switch to CFA modes when relevant.
+    --       For instance, anything based on a mosaic view (say, History), will refresh with ui/flashui on its own (so no CFA),
+    --       but since it is a view flagged as `dithered`, a manual refresh *will* use GCC16 ;).
+    if dither and fb.device:hasKaleidoWfm() and fb:isColorEnabled() then
+        if fb:_isREAGLWaveFormMode(waveform_mode) then
+            -- NOTE: If we wanted to be really fancy, we could check if fb is actually grayscale or not
+            --       (e.g., lerp/nearest bb to 1x1 and see if r==g==b?).
+            --       It's probably much much simpler to just set the dither flag when ReaderHighlight draws something, though ;).
+            waveform_mode = fb.waveform_color_reagl
+            ioc_data.waveform_mode = waveform_mode
+        elseif fb:_isFullWaveFormMode(waveform_mode) then
+            waveform_mode = fb.waveform_color
+            ioc_data.waveform_mode = waveform_mode
+        end
+
+        -- Boost saturation for CFA modes
+        if fb:_isKaleidoWaveFormMode(waveform_mode) then
+            ioc_data.flags = bor(ioc_data.flags, fb.CFA_PROCESSING_FLAG)
+        end
+    end
+
     -- Handle night mode shenanigans
     if fb.night_mode then
         -- We're in nightmode!
@@ -401,26 +393,29 @@ local function mxc_update(fb, ioc_cmd, ioc_data, is_flashing, waveform_mode, x, 
             ioc_data.flags = bor(ioc_data.flags, C.EPDC_FLAG_ENABLE_INVERSION)
         end
 
-        -- Enforce a nightmode-specific mode (usually, GC16), to limit ghosting, where appropriate (i.e., partial & flashes).
-        -- There's nothing much we can do about crappy flashing behavior on some devices, though (c.f., base/#884),
-        -- that's in the hands of the EPDC. Kindle PW2+ behave sanely, for instance, even when flashing on AUTO or GC16 ;).
-        if fb:_isPartialWaveFormMode(waveform_mode) then
-            waveform_mode = fb:_getNightWaveFormMode()
-            ioc_data.waveform_mode = waveform_mode
-            -- And handle devices like the KOA2/PW4, where night is a REAGL waveform that needs to be FULL...
-            if fb:_isNightREAGL() then
-                ioc_data.update_mode = C.UPDATE_MODE_FULL
+        -- Leave Kaleido waveform modes alone
+        if not fb:_isKaleidoWaveFormMode(waveform_mode) then
+            -- Enforce a nightmode-specific mode (usually, GC16), to limit ghosting, where appropriate (i.e., partial & flashes).
+            -- There's nothing much we can do about crappy flashing behavior on some devices, though (c.f., base/#884),
+            -- that's in the hands of the EPDC. Kindle PW2+ behave sanely, for instance, even when flashing on AUTO or GC16 ;).
+            if fb:_isPartialWaveFormMode(waveform_mode) then
+                waveform_mode = fb.waveform_night
+                ioc_data.waveform_mode = waveform_mode
+                -- And handle devices like the KOA2/PW4, where night is a REAGL waveform that needs to be FULL...
+                if fb:_isNightREAGL() then
+                    ioc_data.update_mode = C.UPDATE_MODE_FULL
+                end
+            elseif waveform_mode == C.WAVEFORM_MODE_GC16 or is_flashing then
+                waveform_mode = fb.waveform_flashnight
+                ioc_data.waveform_mode = waveform_mode
             end
-        elseif waveform_mode == C.WAVEFORM_MODE_GC16 or is_flashing then
-            waveform_mode = fb:_getFlashNightWaveFormMode()
-            ioc_data.waveform_mode = waveform_mode
         end
     end
 
-    -- Handle REAGL promotion...
+    -- Handle promotion to FULL for the specific waveform modes that require it...
     -- NOTE: We need to do this here, because we rely on the pre-promotion actual is_flashing in previous heuristics.
-    if fb:_isREAGLWaveFormMode(waveform_mode) then
-        -- NOTE: REAGL updates always need to be full.
+    if fb:_isREAGLWaveFormMode(waveform_mode) or fb:_isKaleidoWaveFormMode(waveform_mode) then
+        -- NOTE: REAGL & Kaleido updates (almost) always need to be full.
         ioc_data.update_mode = C.UPDATE_MODE_FULL
     end
 
@@ -451,6 +446,36 @@ local function mxc_update(fb, ioc_cmd, ioc_data, is_flashing, waveform_mode, x, 
         -- And make sure we won't wait for it again, in case the next refresh trips one of our wait_for_*  heuristics ;).
         fb.dont_wait_for_marker = marker
     end
+
+    -- NOTE: For PARTIAL, as long as they're not DU/A2, we'll instead just wait for the update's submission, if that's available.
+    -- NOTE: This is mainly used on (MTK) Kobos.
+    if fb.wait_for_submission_after
+      and ioc_data.update_mode == C.UPDATE_MODE_PARTIAL
+      and fb:_isNotFastWaveFormMode(waveform_mode)
+      and (marker ~= 0 and marker ~= fb.dont_wait_for_marker) then
+        fb.debug("refresh: wait for submission of marker", marker)
+        if fb:mech_wait_update_submission(marker) == -1 then
+            local err = ffi.errno()
+            fb.debug("MXCFB_WAIT_FOR_UPDATE_SUBMISSION ioctl failed:", ffi.string(C.strerror(err)))
+        end
+    end
+
+    -- NOTE: Jotting down some notes about the flickering of disappearing highlights on Kobo MTK:
+    -- * Waiting for complete *before* Fast helps when we do HL -> UnHL -> UI
+    -- * Waiting for complete *before* UI helps when we do HL -> UI (i.e., when we elide the UnHL)
+    -- Both are... pretty bad for latency, though.
+    -- * Waiting for submission *after* Fast doesn't help.
+    -- * Waiting for complete *after* Fast helps everywhere, but obviously murders latency, too.
+    -- FWIW, Nickel does (using AUTO everywhere): Complete -> HL -> Submission -> UI -> Complete -> UnHL -> Submission
+    -- * Doing something similar with our usual DU + AUTO combos doesn't help.
+    -- NOTE: Much like on lab126 MTK, bumping UIManager:yieldToEPDC to something along the lines of 175ms helps,
+    --       but is also obviously not desirable latency-wise.
+    --       Interestingly enough, lab126 devices are affected the *other* way around:
+    --       they tend to optimize *out* the highlight, instead of having trouble dealing with the unhighlight...
+    -- In a fun twist, the flickers are gone in night mode -_-".
+    -- NOTE: This doesn't happen when CFA processing is disabled
+    --       (at which point, it starts to look like lab126 MTK, where highlights are often optimized out...),
+    --       so I guess this all comes from the CFA processing :/.
 end
 
 local function refresh_k51(fb, is_flashing, waveform_mode, x, y, w, h)
@@ -684,28 +709,30 @@ local function refresh_kobo_mk7(fb, is_flashing, waveform_mode, x, y, w, h, dith
 end
 
 local function refresh_kobo_mtk(fb, is_flashing, waveform_mode, x, y, w, h, dither)
-    -- FIXME: Enable this, assuming it actually fits our purpose.
-    -- Enable the appropriate flag when requesting an any->2bit update, provided we're not dithering.
-    -- NOTE: See FBInk note about DITHER + MONOCHROME
-    --[[
-    if waveform_mode == C.HWTCON_WAVEFORM_MODE_DU and not dither then
-        fb.update_data.flags = C.HWTCON_FLAG_FORCE_A2_OUTPUT
-    else
-        fb.update_data.flags = 0
-    end
-    --]]
-    fb.update_data.flags = 0
-
     -- Did we request HW dithering?
     if dither and fb.device:canHWDither() then
         fb.update_data.flags = bor(fb.update_data.flags, C.HWTCON_FLAG_USE_DITHERING)
 
-        if waveform_mode == C.HWTCON_WAVEFORM_MODE_DU or waveform_mode == C.HWTCON_WAVEFORM_MODE_A2 then
+        -- NOTE: We only use A2 for the virtual keyboard, and Nickel forgoes dithering in that context.
+        if waveform_mode == C.HWTCON_WAVEFORM_MODE_DU then
             fb.update_data.dither_mode = C.HWTCON_FLAG_USE_DITHERING_Y8_Y1_S
         else
             fb.update_data.dither_mode = C.HWTCON_FLAG_USE_DITHERING_Y8_Y4_S
         end
+    else
+        fb.update_data.flags = 0
+        fb.update_data.dither_mode = 0
     end
+
+    --[[
+    -- Disable CFA processing on A2/DU
+    -- NOTE: Well, that leads to... interesting... results when used @ 32bpp...
+    --       The driver seems to have trouble choosing the right working buffer,
+    --       so you get to see a lot of weird crap ;).
+    if waveform_mode == C.HWTCON_WAVEFORM_MODE_A2 or waveform_mode == C.HWTCON_WAVEFORM_MODE_DU then
+        fb.update_data.flags = bor(fb.update_data.flags, C.HWTCON_FLAG_CFA_SKIP)
+    end
+    --]]
 
     return mxc_update(fb, C.HWTCON_SEND_UPDATE, fb.update_data, is_flashing, waveform_mode, x, y, w, h, dither)
 end
@@ -812,6 +839,8 @@ function framebuffer:init()
         self.mech_refresh = refresh_k51
         self.mech_wait_update_complete = kindle_pearl_mxc_wait_for_update_complete
         self.mech_wait_update_submission = kindle_mxc_wait_for_update_submission
+        -- Kindles wait for submission of the *previous* marker
+        self.wait_for_submission_before = true
 
         self.waveform_a2 = C.WAVEFORM_MODE_A2
         self.waveform_fast = C.WAVEFORM_MODE_DU
@@ -982,8 +1011,16 @@ function framebuffer:init()
         if self.device:isMTK() then
             self.mech_refresh = refresh_kobo_mtk
             self.mech_wait_update_complete = kobo_mtk_wait_for_update_complete
-            -- FIXME: Enable this, assuming it behaves...
-            --self.mech_wait_update_submission = kobo_mtk_wait_for_update_submission
+            self.mech_wait_update_submission = kobo_mtk_wait_for_update_submission
+            -- Kobos wait for submission of the *just sent* marker
+            self.wait_for_submission_after = true
+
+            -- Regardless of dithering, there appears to be an off-by-one issue somewhere in the driver,
+            -- so partial refreshes at exact coordinates will sometimes be cut-off one pixel short...
+            -- That can obviously lead to leftover stale content visible on screen,
+            -- so, just enforce larger refresh regions on our side...
+            self.alignment_constraint = 16
+            self.dither_alignment_constraint = 16
 
             self.waveform_a2 = C.HWTCON_WAVEFORM_MODE_A2
             self.waveform_fast = C.HWTCON_WAVEFORM_MODE_DU
@@ -991,12 +1028,43 @@ function framebuffer:init()
             self.waveform_flashui = self.waveform_ui
             self.waveform_full = C.HWTCON_WAVEFORM_MODE_GC16
             -- REAGL is *always* available
-            self.waveform_partial = C.HWTCON_WAVEFORM_MODE_GLR16
+            self.waveform_reagl = C.HWTCON_WAVEFORM_MODE_GLR16
+            self.waveform_partial = self.waveform_reagl
             -- Eclipse waveform modes are *always* available
             self.waveform_night = C.HWTCON_WAVEFORM_MODE_GLKW16
             self.waveform_flashnight = C.HWTCON_WAVEFORM_MODE_GCK16
+            self.night_is_reagl = true
+            -- Kaleido waveform modes are only ever used *conditionally*
+            self.waveform_color = C.HWTCON_WAVEFORM_MODE_GCC16
+            self.waveform_color_reagl = C.HWTCON_WAVEFORM_MODE_GLRC16
 
             self.mech_poweron = kobo_mtk_wakeup_epdc
+
+            -- The Elipsa 2E was the first MTK device, and it does... a few things differently :/.
+            if self.device.model == "Kobo_condor" then
+                -- It doesn't use WAIT_FOR_UPDATE_SUBMISSION
+                self.wait_for_submission_after = false
+                -- It does *NOT* enforce FULL on REAGL updates
+                self.waveform_reagl = nil
+                self.night_is_reagl = false
+                -- For some mysterious reason, Eclipse waveform modes are completely broken outside of 32bpp.
+                -- (This is no longer a concern on later devices, as they no longer allow switching to 8bpp at all).
+                if self.fb_bb ~= 32 then
+                    -- Trust @katadelos and let AUTO figure it out (https://github.com/koreader/koreader-base/pull/1768)
+                    self.waveform_night = C.HWTCON_WAVEFORM_MODE_AUTO
+                    self.waveform_flashnight = C.HWTCON_WAVEFORM_MODE_AUTO
+                end
+            end
+
+            -- NOTE: Can't use hasKaleidoWfm, it's set *after* we instantiate...
+            if self.device:hasColorScreen() then
+                if self:noCFAPostProcess() then
+                    -- Just stomp the flag if the user wants to forgo post-processing
+                    self.CFA_PROCESSING_FLAG = 0 -- Or C.HWTCON_FLAG_CFA_EINK_G1
+                else
+                    self.CFA_PROCESSING_FLAG = C.HWTCON_FLAG_CFA_EINK_G2
+                end
+            end
         end
 
         local bypass_wait_for = self:getMxcWaitForBypass()

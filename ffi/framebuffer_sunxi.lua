@@ -1,7 +1,6 @@
 local bit = require("bit")
 local ffi = require("ffi")
 local ffiUtil = require("ffi/util")
-local BB = require("ffi/blitbuffer")
 local C = ffi.C
 
 require("ffi/posix_h")
@@ -17,11 +16,12 @@ local framebuffer = {
     mech_poweron = nil,
     mech_wait_update_complete = nil,
     mech_wait_update_submission = nil,
-    waveform_partial = nil,
+    waveform_a2 = nil,
+    waveform_fast = nil,
     waveform_ui = nil,
+    waveform_partial = nil,
     waveform_flashui = nil,
     waveform_full = nil,
-    waveform_fast = nil,
     waveform_reagl = nil,
     waveform_night = nil,
     waveform_flashnight = nil,
@@ -121,14 +121,14 @@ local function disp_update(fb, ioc_cmd, ioc_data, no_merge, is_flashing, wavefor
     if fb._just_rotated then
         x = 0
         y = 0
-        w = nil
-        h = nil
+        w = bb:getWidth()
+        h = bb:getHeight()
         fb._just_rotated = nil
         no_merge = true
     end
 
-    w, x = BB.checkBounds(w or bb:getWidth(), x or 0, 0, bb:getWidth(), 0xFFFF)
-    h, y = BB.checkBounds(h or bb:getHeight(), y or 0, 0, bb:getHeight(), 0xFFFF)
+    -- Sanitize refresh rect
+    x, y, w, h = bb:getBoundedRect(x, y, w, h)
     x, y, w, h = bb:getPhysicalRect(x, y, w, h)
 
     -- Discard empty or bogus regions

@@ -1,52 +1,65 @@
-cmake_minimum_required(VERSION 3.5.1)
-project(luasocket LANGUAGES)
-
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_LIST_DIR}/../cmake_modules")
-include("koreader_thirdparty_common")
-include("koreader_thirdparty_git")
-
-assert_var_defined(CC)
-assert_var_defined(PLAT)
-assert_var_defined(LUAINC)
-assert_var_defined(INSTALL_DIR)
-
-ep_get_source_dir(SOURCE_DIR)
-
-list(APPEND PATCH_CMD COMMAND sh -c "\"\$@\" src/*" --
-  ${ISED} " "
-  -e "s|socket\\.core|socket.score|"
-  -e "s|socket_core|socket_score|"
-  -e "s|mime\\.core|mime.mcore|"
-  -e "s|mime_core|mime_mcore|"
-  -e "s|SOCKET_CDIR)/core|SOCKET_CDIR)/score|"
-  -e "s|MIME_CDIR)/core|MIME_CDIR)/mcore|"
+list(APPEND PATCH_FILES
+    # Rename modules:
+    # `mime.core` → `mime.mcore`
+    # `socket.core` → `socket.score`
+    namespace.patch
+    # Compatibility with luajit.
+    luajit-compat.patch
+    # To avoid duplicated code in luasec.
+    export-api-for-luasec.patch
 )
-# Don't enforce CFLAGS
-list(APPEND PATCH_CMD COMMAND ${ISED} "s|-O2 -ggdb3 ||g" src/makefile)
-
-list(APPEND BUILD_CMD COMMAND ${KO_MAKE_RECURSIVE} -j${PARALLEL_JOBS} "PLAT=${PLAT}" "CC=${CC}" "LD=${CC}")
-if(DEFINED MYLDFLAGS)
-  list(APPEND BUILD_CMD "MYLDFLAGS=${MYLDFLAGS}")
+if(NOT ANDROID)
+    # Make sure socket fds are CLOEXEC on *nix.
+    list(APPEND PATCH_FILES enforce-cloexec.patch)
 endif()
-if(DEFINED LUALIB_mingw)
-  list(APPEND BUILD_CMD "LUALIB_mingw=${LUALIB_mingw}")
-endif()
-list(APPEND BUILD_CMD "LUAINC=${LUAINC}" -j${PARALLEL_JOBS} all)
 
-ko_write_gitclone_script(
-    GIT_CLONE_SCRIPT_FILENAME
+list(APPEND CMAKE_ARGS
+    -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
+    -DBUILD_SHARED_LIBS=$<NOT:$<BOOL:${MONOLIBTIC}>>
+)
+
+list(APPEND BUILD_CMD COMMAND ninja)
+
+append_install_commands(
+    INSTALL_CMD
+    ${SOURCE_DIR}/src/ltn12.lua
+    ${SOURCE_DIR}/src/mime.lua
+    ${SOURCE_DIR}/src/socket.lua
+    DESTINATION common
+)
+append_install_commands(
+    INSTALL_CMD
+    ${SOURCE_DIR}/src/ftp.lua
+    ${SOURCE_DIR}/src/headers.lua
+    ${SOURCE_DIR}/src/http.lua
+    ${SOURCE_DIR}/src/smtp.lua
+    ${SOURCE_DIR}/src/tp.lua
+    ${SOURCE_DIR}/src/url.lua
+    DESTINATION common/socket
+)
+append_install_commands(INSTALL_CMD DESTINATION ${STAGING_DIR}/include/luasocket
+    ${SOURCE_DIR}/src/buffer.h
+    ${SOURCE_DIR}/src/compat.h
+    ${SOURCE_DIR}/src/io.h
+    ${SOURCE_DIR}/src/luasocket.h
+    ${SOURCE_DIR}/src/socket.h
+    ${SOURCE_DIR}/src/timeout.h
+    ${SOURCE_DIR}/src/usocket.h
+)
+append_install_commands(INSTALL_CMD libluasocket.a DESTINATION ${STAGING_DIR}/lib)
+if(MONOLIBTIC)
+    append_install_commands(INSTALL_CMD mcore.a score.a DESTINATION ${STAGING_DIR}/lib)
+else()
+    append_binary_install_command(INSTALL_CMD score.so DESTINATION common/socket)
+    append_binary_install_command(INSTALL_CMD mcore.so DESTINATION common/mime)
+endif()
+
+external_project(
+    DOWNLOAD GIT e3ca4a767a68d127df548d82669aba3689bd84f4
     https://github.com/lunarmodules/luasocket
-    8c2ff7217e2a205eb107a6f48b04ff1b2b3090a1
-    ${SOURCE_DIR}
-)
-
-include(ExternalProject)
-ExternalProject_Add(
-    ${PROJECT_NAME}
-    DOWNLOAD_COMMAND ${CMAKE_COMMAND} -P ${GIT_CLONE_SCRIPT_FILENAME}
-    BUILD_IN_SOURCE 1
-    PATCH_COMMAND ${PATCH_CMD}
-    CONFIGURE_COMMAND ""
+    PATCH_OVERLAY overlay
+    PATCH_FILES ${PATCH_FILES}
+    CMAKE_ARGS ${CMAKE_ARGS}
     BUILD_COMMAND ${BUILD_CMD}
-    INSTALL_COMMAND ${KO_MAKE_RECURSIVE} INSTALL_TOP_LDIR=${INSTALL_DIR} INSTALL_TOP_CDIR=${INSTALL_DIR} install
+    INSTALL_COMMAND ${INSTALL_CMD}
 )

@@ -60,27 +60,9 @@ int WideCharToMultiByte(
 );
 ]]
 
-local getlibprefix = function()
-    -- Apple M1 homebrew installs libraries outside of default searchpaths,
-    -- and dyld environment variables are sip-protected on MacOS, cf. https://github.com/Homebrew/brew/issues/13481#issuecomment-1181592842
-    local libprefix = os.getenv("KO_DYLD_PREFIX")
-
-    if not libprefix then
-        local std_out = io.popen("brew --prefix", "r")
-            if std_out then
-                libprefix = std_out:read("*line")
-                std_out:close()
-            end
-    end
-
-    return libprefix
-end
-
 require("ffi/posix_h")
 
 local util = {}
-
-util.KO_DYLD_PREFIX = ffi.os == "OSX" and getlibprefix() or ""
 
 if ffi.os == "Windows" then
     util.gettime = function()
@@ -193,10 +175,17 @@ if ffi.os == "Windows" then
     end
 else
     function util.basename(in_path)
-        -- We have no guarantee of getting a GNU implementation of basename;
-        -- POSIX compliant implementations *will* modify input, so, always make a copy.
-        local path = ffi.new("char[?]", #in_path + 1, in_path)
-        return ffi.string(C.basename(path))
+        -- NOTE: We dlsym the unprefixed symbol, because it's the only one Android provides.
+        --       That just so happens to be the GNU implementation on Linux + glibc,
+        --       but on other platforms, all bets are off as to whether this will pull a GNU-ish or POSIX-y implementation...
+        --       We need to be aware of the distinction, because strictly POSIX compliant implementations *will* modify input,
+        --       so, always make a copy to be safe.
+        -- NOTE: Moreover, the GNU implementation has a few potentially annoying quirks:
+        --       it returns an empty string when path has a trailing slash (as well as for "/").
+        --       So, we'll want to strip trailing slashes, too...
+        local stripped_path = in_path:match(".*[^/]") or "/" -- Ensure basename("/") leads to "/" as per SUSv2
+        local c_path = ffi.new("char[?]", #stripped_path + 1, stripped_path)
+        return ffi.string(C.basename(c_path))
     end
 end
 
@@ -299,6 +288,16 @@ function util.execute(...)
     end
 end
 
+-- Frontend can register functions to be run in all subprocesses
+-- just after the fork, ie. for some cleanup work.
+local _run_in_subprocess_after_fork_funcs = {}
+function util.addRunInSubProcessAfterForkFunc(id, func)
+    _run_in_subprocess_after_fork_funcs[id] = func
+end
+function util.removeRunInSubProcessAfterForkFunc(id)
+    _run_in_subprocess_after_fork_funcs[id] = nil
+end
+
 --- Run lua code (func) in a forked subprocess
 --
 -- With with_pipe=true, sets up a pipe for communication
@@ -329,6 +328,9 @@ function util.runInSubProcess(func, with_pipe, double_fork)
     end
     local pid = C.fork()
     if pid == 0 then -- child process
+        for _, f in pairs(_run_in_subprocess_after_fork_funcs) do
+            f()
+        end
         if double_fork then
             pid = C.fork()
             if pid ~= 0 then
@@ -448,6 +450,7 @@ function util.getNonBlockingReadSize(fd_or_luafile)
     local available = ffi.new('int[1]')
     local ok = C.ioctl(fileno, C.FIONREAD, available)
     if ok ~= 0 then -- ioctl failed, not supported
+        print("C.ioctl(…, FIONREAD, …) failed:", ffi.string(C.strerror(ffi.errno())))
         return
     end
     available = tonumber(available[0])
@@ -624,32 +627,6 @@ function util.multiByteToUTF8(str, codepage)
     end
 end
 
-function util.ffiLoadCandidates(candidates)
-    local lib_loaded, lib
-
-    for _, candidate in ipairs(candidates) do
-        lib_loaded, lib = pcall(ffi.load, candidate)
-
-        if lib_loaded then
-            return lib
-        end
-    end
-
-    -- we failed, lib is the error message
-    return lib_loaded, lib
-end
-
---- Returns true if isWindows…
-if ffi.os == "Windows" then
-    function util.isWindows()
-        return true
-    end
-else
-    function util.isWindows()
-        return false
-    end
-end
-
 local isAndroid = nil
 --- Returns true if Android.
 -- For now, we just check if the "android" module can be loaded.
@@ -664,40 +641,22 @@ function util.isPocketbook()
     return lfs.attributes("/ebrmain/pocketbook")
 end
 
-local haveSDL2 = nil
---- Returns true if SDL2
-function util.haveSDL2()
-    local err
-
-    if haveSDL2 == nil then
-        local candidates
-        if ffi.os == "OSX" then
-            candidates = {"libs/libSDL2.dylib", "SDL2", util.KO_DYLD_PREFIX .. "/lib/libSDL2.dylib"}
-        else
-            candidates = {"SDL2", "libSDL2-2.0.so", "libSDL2-2.0.so.0"}
+local libSDL2 = nil
+--- Returns SDL2 library
+function util.loadSDL2()
+    if libSDL2 == nil then
+        local ok
+        ok, libSDL2 = pcall(ffi.loadlib,
+            "SDL2-2.0", 0,
+            "SDL2-2.0", nil,
+            "SDL2", nil
+        )
+        if not ok then
+            print("SDL2 not loaded:", libSDL2)
+            libSDL2 = false
         end
-        haveSDL2, err = util.ffiLoadCandidates(candidates)
     end
-    if not haveSDL2 then
-        print("SDL2 not loaded:", err)
-    end
-
-    return haveSDL2
-end
-
-local isSDL = nil
---- Returns true if SDL
-function util.isSDL()
-    if isSDL == nil then
-        isSDL = util.haveSDL2()
-    end
-    return isSDL
-end
-
---- Silence the SDL checks (solely for front's frontend/device.lua usage!)
-function util.noSDL()
-    haveSDL2 = false
-    isSDL = false
+    return libSDL2 or nil
 end
 
 --- Division with integer result.

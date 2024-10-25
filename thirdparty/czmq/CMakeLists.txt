@@ -1,53 +1,44 @@
-cmake_minimum_required(VERSION 3.5.1)
-project(czmq LANGUAGES)
-
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_LIST_DIR}/../cmake_modules")
-include("koreader_thirdparty_common")
-include("koreader_thirdparty_git")
-
-assert_var_defined(CC)
-assert_var_defined(CFLAGS)
-assert_var_defined(LDFLAGS)
-assert_var_defined(ZMQ_DIR)
-assert_var_defined(CHOST)
-
-ep_get_source_dir(SOURCE_DIR)
-ep_get_binary_dir(BINARY_DIR)
-
-# -Wno-error so we can build on glibc 2.24 in spite of readdir_r
-set(CFG_ENV_VAR "CC=${CC}" "LDFLAGS=${LDFLAGS}" "CFLAGS=${CFLAGS} -Wno-error" czmq_have_xmlto=no czmq_have_asciidoc=no)
-set(CFG_OPTS --prefix=${BINARY_DIR} --libdir=${BINARY_DIR}/lib --with-gnu-ld --with-libzmq=${ZMQ_DIR} --disable-static --enable-shared --host=${CHOST})
-list(APPEND CFG_CMD COMMAND env ${CFG_ENV_VAR} ${SOURCE_DIR}/configure ${CFG_OPTS})
-
-if(DEFINED ENV{ANDROID})
-    list(APPEND CFG_CMD COMMAND ${ANDROID_LIBTOOL_FIX_CMD})
+list(APPEND PATCH_FILES cmake_tweaks.patch)
+if(ANDROID)
+    list(APPEND PATCH_FILES android.patch)
 endif()
 
-# Hack to remove hardcoded rpath
-list(APPEND CFG_CMD COMMAND ${ISED} "s|^hardcode_libdir_flag_spec=.*|hardcode_libdir_flag_spec=\"\"|g" libtool)
-list(APPEND CFG_CMD COMMAND ${ISED} "s|^runpath_var=LD_RUN_PATH|runpath_var=DIE_RPATH_DIE|g" libtool)
+# Pre-emptively remove `src/platform.h`: this is normaly done by
+# `CMakeLists.txt` at configure time, and wreaks havoc with `build.d`
+# generation. Since the later is done before configuring, a missing
+# `src/platform.h` would endlessly trigger a new czmq build.
+list(APPEND PATCH_CMD COMMAND rm src/platform.h)
 
-list(APPEND PATCH_CMD COMMAND ./autogen.sh)
-if(NOT DEFINED ENV{DARWIN})
-    # patch: ignore limited broadcast address
-    list(APPEND PATCH_CMD COMMAND ${KO_PATCH} ${CMAKE_CURRENT_SOURCE_DIR}/zbeacon.patch)
-    # patch: add _DEFAULT_SOURCE define for glibc starting at version 2.20
-    list(APPEND PATCH_CMD COMMAND ${KO_PATCH} ${CMAKE_CURRENT_SOURCE_DIR}/czmq_default_source_define.patch)
-endif()
-
-ko_write_gitclone_script(
-    GIT_CLONE_SCRIPT_FILENAME
-    https://github.com/zeromq/czmq.git
-    2a0ddbc4b2dde623220d7f4980ddd60e910cfa78
-    ${SOURCE_DIR}
+list(APPEND CMAKE_ARGS
+    -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
+    # Project options.
+    -DCZMQ_BUILD_SHARED=$<NOT:$<BOOL:${MONOLIBTIC}>>
+    -DCZMQ_BUILD_STATIC=$<BOOL:${MONOLIBTIC}>
+    -DENABLE_DRAFTS=FALSE
+    # Disable some dependencies (which will automatically
+    # disable the corresponding project optional features).
+    -DCMAKE_DISABLE_FIND_PACKAGE_libcurl=TRUE
+    -DCMAKE_DISABLE_FIND_PACKAGE_libmicrohttpd=TRUE
+    -DCMAKE_DISABLE_FIND_PACKAGE_lz4=TRUE
+    -DCMAKE_DISABLE_FIND_PACKAGE_nss=TRUE
+    -DCMAKE_DISABLE_FIND_PACKAGE_systemd=TRUE
+    -DCMAKE_DISABLE_FIND_PACKAGE_uuid=TRUE
 )
 
-include(ExternalProject)
-ExternalProject_Add(
-    ${PROJECT_NAME}
-    DOWNLOAD_COMMAND ${CMAKE_COMMAND} -P ${GIT_CLONE_SCRIPT_FILENAME}
+list(APPEND BUILD_CMD COMMAND ninja)
+
+list(APPEND INSTALL_CMD COMMAND ${CMAKE_COMMAND} --install .)
+
+if(NOT MONOLIBTIC)
+    append_shared_lib_install_commands(INSTALL_CMD czmq VERSION 4)
+endif()
+
+external_project(
+    DOWNLOAD URL 471e9ec120fc66a2fe2aae14359e3cfa
+    https://github.com/zeromq/czmq/releases/download/v4.2.1/czmq-4.2.1.tar.gz
+    PATCH_FILES ${PATCH_FILES}
     PATCH_COMMAND ${PATCH_CMD}
-    CONFIGURE_COMMAND ${CFG_CMD}
-    BUILD_COMMAND ${KO_MAKE_RECURSIVE} -j${PARALLEL_JOBS}
-    INSTALL_COMMAND ${KO_MAKE_RECURSIVE} installdirs uninstall install
+    CMAKE_ARGS ${CMAKE_ARGS}
+    BUILD_COMMAND ${BUILD_CMD}
+    INSTALL_COMMAND ${INSTALL_CMD}
 )

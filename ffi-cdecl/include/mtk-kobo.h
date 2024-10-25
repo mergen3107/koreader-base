@@ -47,6 +47,32 @@
 #define HWTCON_FLAG_FORCE_A2_OUTPUT_BLACK 0x40    // White pen, requires HWTCON_FLAG_FORCE_A2_OUTPUT
 // Pen color is auto-detected if only HWTCON_FLAG_FORCE_A2_OUTPUT is provided
 
+// Introduced with Kaleido devices
+// NOTE: Used by the driver to convert between the user & kernel representations of the CFA_MODE flags.
+//       c.f., HWTCON_FLAG_GET_CFA_MODE/HWTCON_FLAG_SET_CFA_MODE @ drivers/misc/mediatek/hwtcon/hwtcon_fb.h
+// NOTE: We pull in the actual kernel representations later, as they're used for the set/get cfa_mode ioctls...
+#define HWTCON_FLAG_CFA_FLDS_MASK 0x00007f00
+
+// NOTE: The 'S' variants appear to affect more things than plain saturation
+//       (contrast? intensity? levels in general?), hence the polarization & clipping effects.
+//       They... rarely look good, but they *do* technically lead to the most vibrant colors.
+//       The strength of the filters go crescendo, so banding may not be immediately visible at S4,
+//       depending on the content being displayed.
+// NOTE: Generally speaking you'll want to keep to the defaults and implement a saturation boost yourself,
+//       or play with G2, as it's the least destructive option, and roughly matches a 50% HSP sat boost.
+#define HWTCON_FLAG_CFA_EINK_AIE_S4 0x00000200
+#define HWTCON_FLAG_CFA_EINK_AIE_S7 0x00000300
+#define HWTCON_FLAG_CFA_EINK_AIE_S9 0x00000400
+#define HWTCON_FLAG_CFA_EINK_G0     0x00000500    // Desaturate
+#define HWTCON_FLAG_CFA_EINK_G1     0x00000100    // Standard behavior (e.g., same results as no flags)
+#define HWTCON_FLAG_CFA_EINK_NORMAL HWTCON_FLAG_CFA_EINK_G1
+#define HWTCON_FLAG_CFA_EINK_G2     0x00000600    // Boosts saturation without being too destructive
+// NOTE: Those two look like test implementations by NTX (as opposed to stuff from eInk's libEink_Kaleido binary blob).
+#define HWTCON_FLAG_CFA_EINK_NTX    0x00000a00
+#define HWTCON_FLAG_CFA_EINK_NTX_SF 0x00000b00
+// NOTE: Disables CFA processing, leading to B&W rendering (i.e., HWTCON_CFA_MODE_NONE).
+#define HWTCON_FLAG_CFA_SKIP        0x00008000
+
 /* temperature use sensor. */
 // NOTE: No longer set request-by-request, but globally via HWTCON_SET_TEMPERATURE
 #define TEMP_USE_SENSOR 0x100000
@@ -57,6 +83,10 @@
 
 // NOTE: That confusing `enable_night_mode_by_wfm` mapping is never actually used, unless you enable it via the debug procfs knob.
 //       FWIW, lab126 does GC16 => GCK16 & GLR16 => GLKW16...
+// NOTE: Like it's always been the case on lab126 devices, on newer devices (i.e., not the Elipsa 2E),
+//       anything involving REAGL (i.e., GLR16, GLKW16 & GLRC16) is *always* paired with FULL.
+//       Likewise, stuff tweaked for Kaleido (GCC16 & GLRC16) is also *always* paired with FULL.
+//       GLRC16 *is* a REAGL waveform mode, so it won't actually flash.
 enum HWTCON_WAVEFORM_MODE_ENUM
 {
 	// Matches MXCFB
@@ -70,6 +100,9 @@ enum HWTCON_WAVEFORM_MODE_ENUM
 	HWTCON_WAVEFORM_MODE_A2     = 6,
 	HWTCON_WAVEFORM_MODE_GCK16  = 8,
 	HWTCON_WAVEFORM_MODE_GLKW16 = 9,    // AKA. GCKW16; REAGL DARK
+	// Introduced with Kaleido devices
+	HWTCON_WAVEFORM_MODE_GCC16  = 10,    // Used for images on color panels.
+	HWTCON_WAVEFORM_MODE_GLRC16 = 11,    // Used for color highlights on text. (GLKW16 in dark mode).
 	// Matches MXCFB
 	HWTCON_WAVEFORM_MODE_AUTO   = 257,
 };
@@ -232,6 +265,29 @@ struct hwtcon_panel_info
 
 /* Get the screen updating flag set by HWTCON_SET_PAUSE or HWTCON_SET_RESUME */
 #define HWTCON_GET_PAUSE _IOW(HWTCON_IOCTL_MAGIC_NUMBER, 0x34, uint32_t)
+
+// Introduced with Kaleido devices
+// Kernel representation of the CFA_MODE constants, for use with the two ioctls below (from hwtcon_fb.h)
+#define HWTCON_CFA_MODE_NONE        0
+#define HWTCON_CFA_MODE_EINK_G1     1     // eink color enhance gain=1
+#define HWTCON_CFA_MODE_EINK_AIE_S4 2     // eink AIE algorithm S4
+#define HWTCON_CFA_MODE_EINK_AIE_S7 3     // eink AIE algorithm S7
+#define HWTCON_CFA_MODE_EINK_AIE_S9 4     // eink AIE algorithm S9
+#define HWTCON_CFA_MODE_EINK_G0     5     // eink color enhance gain=0
+#define HWTCON_CFA_MODE_EINK_G2     6     // eink color enhance gain=2
+#define HWTCON_CFA_MODE_NTX         10    // color mapping by epdfbdc
+#define HWTCON_CFA_MODE_NTX_SF      11    // simple fast color mapping
+#define HWTCON_CFA_MODE_EINK_NORMAL HWTCON_CFA_MODE_EINK_G1
+#define HWTCON_CFA_MODE_DEFAULT     HWTCON_CFA_MODE_EINK_NORMAL
+
+/* Get the current default CFA mode */
+// NOTE: Arg is a pointer to an uint32_t
+// NOTE: This is the CFA_MODE that is used when you do *NOT* set an HWTCON_FLAG_CFA_* flag in the update request.
+//       Defaults to EINK_NORMAL.
+#define HWTCON_SET_CFA_MODE _IOW(HWTCON_IOCTL_MAGIC_NUMBER, 0x50, uint32_t)
+/* Set the current default CFA mode */
+// NOTE: Arg is a pointer to an uint32_t
+#define HWTCON_GET_CFA_MODE _IOW(HWTCON_IOCTL_MAGIC_NUMBER, 0x51, uint32_t)
 
 #define HWTCON_GET_PANEL_INFO _IOR(HWTCON_IOCTL_MAGIC_NUMBER, 0x130, struct hwtcon_panel_info)
 

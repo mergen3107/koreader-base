@@ -9,10 +9,14 @@ require("ffi/linux_input_h")
 local input = {
     -- to trigger refreshes for certain Android framework events:
     device = nil,
+    -- NOPs
+    open = function() end,
+    close = function() end,
+    closeAll = function() end,
+    fakeTapInput = function() end,
+    -- Tell front that we're a custom imp with no concept of paths/fd
+    is_ffi = true,
 }
-
-function input.open()
-end
 
 local inputQueue = {}
 
@@ -181,7 +185,8 @@ local function keyEventHandler(key_event)
     or code == C.AKEYCODE_MEDIA_NEXT
     or code == C.AKEYCODE_MEDIA_PREVIOUS
     or code == C.AKEYCODE_MEDIA_REWIND
-    or code == C.AKEYCODE_MEDIA_FAST_FORWARD then
+    or code == C.AKEYCODE_MEDIA_FAST_FORWARD
+    or code == C.AKEYCODE_HEADSETHOOK then
         return 0 -- event not consumed
     elseif code == C.AKEYCODE_MUTE
     or code == C.AKEYCODE_VOLUME_MUTE then
@@ -296,8 +301,5 @@ function input.waitForEvent(sec, usec)
         return false, C.EINTR
     end
 end
-
-function input.fakeTapInput() end
-function input.closeAll() end
 
 return input

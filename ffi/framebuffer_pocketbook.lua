@@ -11,20 +11,20 @@ local framebuffer = {
 
 local function _getPhysicalRect(fb, x, y, w, h)
     local bb = fb.full_bb or fb.bb
-    w, x = BB.checkBounds(w or bb:getWidth(), x or 0, 0, bb:getWidth(), 0xFFFF)
-    h, y = BB.checkBounds(h or bb:getHeight(), y or 0, 0, bb:getHeight(), 0xFFFF)
+    x, y, w, h = bb:getBoundedRect(x, y, w, h)
     return bb:getPhysicalRect(x, y, w, h)
 end
 
 local function _adjustAreaColours(fb)
-    if fb.device.hasColorScreen and fb.device.color_saturation then
-        fb.debug("adjusting image color saturation", fb.device.color_saturation)
+    if fb.device.hasColorScreen() then
+        fb.debug("adjusting image color saturation")
 
-        inkview.adjustAreaWithLabColorsSaturation(fb.data, fb._finfo.line_length, fb._vinfo.width, fb._vinfo.height, fb.device.color_saturation)
+        inkview.adjustAreaDefault(fb.data, fb._finfo.line_length, fb._vinfo.width, fb._vinfo.height)
     end
 end
 
-local function _updatePartial(fb, x, y, w, h, dither)
+local function _updatePartial(fb, x, y, w, h, dither, hq)
+    -- Use "hq" argument to trigger high quality refresh for color Pocketbook devices.
     x, y, w, h = _getPhysicalRect(fb, x, y, w, h)
 
     fb.debug("refresh: inkview partial", x, y, w, h, dither)
@@ -33,7 +33,11 @@ local function _updatePartial(fb, x, y, w, h, dither)
         _adjustAreaColours(fb)
     end
 
-    inkview.PartialUpdate(x, y, w, h)
+    if fb.device.hasColorScreen() and hq then
+        inkview.PartialUpdateHQ(x, y, w, h)
+    else
+        inkview.PartialUpdate(x, y, w, h)
+    end
 end
 
 local function _updateFull(fb, x, y, w, h, dither)
@@ -43,7 +47,11 @@ local function _updateFull(fb, x, y, w, h, dither)
         _adjustAreaColours(fb)
     end
 
-    inkview.FullUpdate()
+    if fb.device.hasColorScreen() then
+        inkview.FullUpdateHQ()
+    else
+        inkview.FullUpdate()
+    end
 end
 
 local function _updateFast(fb, x, y, w, h, dither)
@@ -120,19 +128,19 @@ end
 --[[ framebuffer API ]]--
 
 function framebuffer:refreshPartialImp(x, y, w, h, dither)
-    _updatePartial(self, x, y, w, h, dither)
+    _updatePartial(self, x, y, w, h, dither, false)
 end
 
 function framebuffer:refreshFlashPartialImp(x, y, w, h, dither)
-    _updatePartial(self, x, y, w, h, dither)
+    _updatePartial(self, x, y, w, h, dither, true)
 end
 
 function framebuffer:refreshUIImp(x, y, w, h, dither)
-    _updatePartial(self, x, y, w, h, dither)
+    _updatePartial(self, x, y, w, h, dither, false)
 end
 
 function framebuffer:refreshFlashUIImp(x, y, w, h, dither)
-    _updatePartial(self, x, y, w, h, dither)
+    _updatePartial(self, x, y, w, h, dither, true)
 end
 
 function framebuffer:refreshFullImp(x, y, w, h, dither)

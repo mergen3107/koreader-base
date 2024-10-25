@@ -37,6 +37,7 @@
 
 #define CODE_FAKE_IN_SAVER            10000
 #define CODE_FAKE_OUT_SAVER           10001
+#define CODE_FAKE_EXIT_SAVER          10002  // For Kindle's exitingScreenSaver
 // Device is plugged to USB host
 #define CODE_FAKE_USB_PLUGGED_IN_TO_HOST    10010
 #define CODE_FAKE_USB_PLUGGED_OUT_OF_HOST   10011
@@ -89,6 +90,18 @@ static void computeNfds(void) {
     }
 }
 
+// NOTE: Make sure the top member has the highest fd number, for clearTimer's sake when it recomputes nfds
+static void reorderArray(void) {
+    if (fd_idx > 0) {
+        int prev_fd   = inputfds[fd_idx - 1];
+        int opened_fd = inputfds[fd_idx];
+        if (opened_fd < prev_fd) {
+            inputfds[fd_idx - 1] = opened_fd;
+            inputfds[fd_idx]     = prev_fd;
+        }
+    }
+}
+
 static int openInputDevice(lua_State* L)
 {
     const char* restrict inputdevice = luaL_checkstring(L, 1);
@@ -99,6 +112,9 @@ static int openInputDevice(lua_State* L)
     const char* restrict ko_dont_grab_input = getenv("KO_DONT_GRAB_INPUT");
 
 #if defined(POCKETBOOK)
+    // NOTE: This is for the deprecated Lua/C PB input implementation (c.f., "input-pocketbook.h").
+    //       The frontend code (e.g., device/input's open wrapper) no longer uses nor supports this,
+    //       as we've unconditionally moved to using the newer Lua/FFI implementation (c.f., ffi/input_pocketbook).
     int inkview_events = luaL_checkint(L, 2);
     if (inkview_events == 1) {
         startInkViewMain(L, fd_idx, inputdevice);
@@ -109,7 +125,7 @@ static int openInputDevice(lua_State* L)
     if (!strcmp("fake_events", inputdevice)) {
         // Special case: the power slider for Kindle and USB events for Kobo.
         int pipefd[2U];
-#if defined(KINDLE_LEGACY)
+#if defined(KINDLE_LEGACY) || defined(POCKETBOOK)
         // pipe2 requires Linux 2.6.27 & glibc 2.9...
         if (pipe(pipefd) == -1) {
             return luaL_error(L, "Cannot create fake event generator communication pipe (pipe(): %s)", strerror(errno));
@@ -170,19 +186,13 @@ static int openInputDevice(lua_State* L)
         }
     }
 
-    // NOTE: Make sure the top member has the highest fd number, for clearTimer's sake when it recomputes nfds
-    if (fd_idx > 0) {
-        int prev_fd   = inputfds[fd_idx - 1];
-        int opened_fd = inputfds[fd_idx];
-        if (opened_fd < prev_fd) {
-            inputfds[fd_idx - 1] = opened_fd;
-            inputfds[fd_idx]     = prev_fd;
-        }
-    }
+    // Reorder the array to match clearTimer's expectations
+    reorderArray();
 
     // We're done w/ inputdevice, pop it
     lua_settop(L, 0);
-    // Pass the fd to Lua, we might need it for FFI ioctl shenanigans
+    // Pass the fd to Lua, front makes use of it to track what was open'ed,
+    // and might need it for further FFI ioctl shenanigans.
     lua_pushinteger(L, inputfds[fd_idx++]);
 
     computeNfds();
@@ -190,16 +200,38 @@ static int openInputDevice(lua_State* L)
     return 1; // fd
 }
 
-static int closeInputDevice(ssize_t fd_idx_to_close)
+static int openInputFD(lua_State* L)
 {
-    int fd = inputfds[fd_idx_to_close];
-    if (fd == -1) {
-        // Device was not open
-        return -1;
-    }
-    ioctl(fd, EVIOCGRAB, 0);
-    close(fd);
+    int fd = luaL_checkint(L, 1);
+    lua_settop(L, 0); // pop arg
 
+    if (fd < 0) {
+        return luaL_error(L, "Passed an invalid fd number to input.fdopen");
+    }
+    if (fd_idx >= ARRAY_SIZE(inputfds)) {
+        // Don't leak that fd on error, in case we're being called in protected mode
+        close(fd);
+        return luaL_error(L, "No free slot for new input fd <%d>", fd);
+    }
+
+    // Everything looks good, we can do our thing!
+    const char* restrict ko_dont_grab_input = getenv("KO_DONT_GRAB_INPUT");
+    if (ko_dont_grab_input == NULL) {
+        ioctl(fd, EVIOCGRAB, 1);
+    }
+
+    // Update our state for the new input slot...
+    inputfds[fd_idx] = fd;
+    reorderArray();
+    fd_idx++;
+    computeNfds();
+
+    return 0;
+}
+
+// Make sure our inputfds array is never sparse after closing one
+static void repackFdArray(ssize_t fd_idx_to_close)
+{
     // Shift the fds after the closed ones backward
     for (ssize_t i = fd_idx_to_close; i < (ssize_t) fd_idx - 1; i++) {
         inputfds[i] = inputfds[i + 1];
@@ -208,18 +240,66 @@ static int closeInputDevice(ssize_t fd_idx_to_close)
     inputfds[--fd_idx] = -1;
 
     computeNfds();
-    printf("[ko-input] Closed input device with fd: %d @ idx: %zd\n", fd, fd_idx_to_close);
+}
+
+static void closeInputDevice(int fd, ssize_t fd_idx_to_close)
+{
+    ioctl(fd, EVIOCGRAB, 0);
+    close(fd);
+
+    repackFdArray(fd_idx_to_close);
+}
+
+// Close a device by fd_idx (for internal use)
+static int closeByIndex(ssize_t fd_idx_to_close)
+{
+    int fd = inputfds[fd_idx_to_close];
+    if (fd == -1) {
+        // Device was not open
+        return -1;
+    }
+
+    closeInputDevice(fd, fd_idx_to_close);
+    printf("[ko-input] Closed input device with fd: %d @ idx: %zd (matched by idx)\n", fd, fd_idx_to_close);
 
     return 0;
 }
 
-static int closeInputDevices(lua_State* L __attribute__((unused)))
+// Close a device by fd number (for public use)
+static int closeByFd(lua_State* L)
+{
+    int fd = luaL_checkint(L, 1);
+    lua_settop(L, 0);  // Pop function arg
+
+    // Check that we've actually still got this one open'ed
+    ssize_t fd_idx_to_close = -1;
+    for (size_t i = 0U; i < fd_idx; i++) {
+        if (inputfds[i] == fd) {
+            fd_idx_to_close = i;
+            break;
+        }
+    }
+    if (fd_idx_to_close == -1) {
+        // fd was not open, tell front (likely we ate an ENODEV in waitForInput already)
+        lua_pushboolean(L, false);
+        lua_pushinteger(L, ENODEV);
+        return 2;
+    }
+
+    closeInputDevice(fd, fd_idx_to_close);
+    printf("[ko-input] Closed input device with fd: %d @ idx: %zd (matched by fd)\n", fd, fd_idx_to_close);
+
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+static int closeAllInputDevices(lua_State* L __attribute__((unused)))
 {
     // Right now, we close everything, but, in the future, we may want to keep *some* slots open.
-    // The function closeInputDevice ensures that the array does not become sparse.
+    // The function `repackFdArray` (via `closeByIndex`) ensures that the array does not become sparse.
     // Closing the fds in the reverse order helps to avoid extra work to keep the array dense, so that the complexity stays linear.
     for (ssize_t i = fd_idx - 1; i >= 0; i--) {
-        closeInputDevice(i);
+        closeByIndex(i);
     }
 
 #if defined(WITH_TIMERFD)
@@ -416,7 +496,7 @@ static int waitForInput(lua_State* L)
                         break;
                     } else if (errno == ENODEV) {
                         // Device was removed
-                        closeInputDevice(i);
+                        closeByIndex(i);
                         lua_settop(L, 0);  // Kick our bogus bool (and potentially the ev_array table) from the stack
                         lua_pushboolean(L, false);
                         lua_pushinteger(L, ENODEV);
@@ -483,18 +563,22 @@ static int waitForInput(lua_State* L)
     return 0;  // Unreachable (unless something is seriously screwy)
 }
 
-static const struct luaL_Reg input_func[] = { { "open", openInputDevice },
-                                              { "closeAll", closeInputDevices },
-                                              { "waitForEvent", waitForInput },
-                                              { "fakeTapInput", fakeTapInput },
+static const struct luaL_Reg input_func[] = {
+                                                { "open", openInputDevice },
+                                                { "fdopen", openInputFD },
+                                                { "close", closeByFd },
+                                                { "closeAll", closeAllInputDevices },
+                                                { "waitForEvent", waitForInput },
+                                                { "fakeTapInput", fakeTapInput },
 #if defined(POCKETBOOK)
-                                              { "setSuspendState", setSuspendState },
+                                                { "setSuspendState", setSuspendState },
 #endif
 #if defined(WITH_TIMERFD)
-                                              { "setTimer", setTimer },
-                                              { "clearTimer", clearTimer },
+                                                { "setTimer", setTimer },
+                                                { "clearTimer", clearTimer },
 #endif
-                                              { NULL, NULL } };
+                                                { NULL, NULL }
+};
 
 int luaopen_input(lua_State* L)
 {

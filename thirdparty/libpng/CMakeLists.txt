@@ -1,39 +1,29 @@
-cmake_minimum_required(VERSION 3.5.1)
-project(libpng LANGUAGES)
+list(APPEND PATCH_FILES math_library.patch)
 
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/../cmake_modules")
-include("koreader_thirdparty_common")
-include("koreader_thirdparty_git")
-
-assert_var_defined(CC)
-assert_var_defined(CXX)
-assert_var_defined(CPPFLAGS)
-assert_var_defined(LDFLAGS)
-
-ep_get_source_dir(SOURCE_DIR)
-ep_get_binary_dir(BINARY_DIR)
-
-set(CFG_ENV_VAR "CC=${CC}" "CXX=${CXX}" "CPPFLAGS=${CPPFLAGS}" "LDFLAGS=${LDFLAGS}")
-set(CFG_OPTS --prefix=${BINARY_DIR} --libdir=${BINARY_DIR}/lib --disable-static --enable-shared --host=${CHOST})
-list(APPEND CFG_CMD COMMAND env ${CFG_ENV_VAR} ${SOURCE_DIR}/configure ${CFG_OPTS})
-
-if(DEFINED ENV{ANDROID})
-    list(APPEND CFG_CMD COMMAND ${ANDROID_LIBTOOL_FIX_CMD})
-endif()
-
-ko_write_gitclone_script(
-    GIT_CLONE_SCRIPT_FILENAME
-    https://github.com/glennrp/libpng.git
-    v1.6.40
-    ${SOURCE_DIR}
+list(APPEND CMAKE_ARGS
+    -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
+    # Project options.
+    -DPNG_DEBUG_POSTFIX=
+    -DPNG_FRAMEWORK=FALSE
+    -DPNG_TOOLS=FALSE
+    -DPNG_SHARED=$<NOT:$<BOOL:${MONOLIBTIC}>>
+    -DPNG_STATIC=$<BOOL:${MONOLIBTIC}>
+    -DPNG_TESTS=FALSE
 )
 
-include(ExternalProject)
-ExternalProject_Add(
-    ${PROJECT_NAME}
-    DOWNLOAD_COMMAND ${CMAKE_COMMAND} -P ${GIT_CLONE_SCRIPT_FILENAME}
-    PATCH_COMMAND ""
-    CONFIGURE_COMMAND ${CFG_CMD}
-    BUILD_COMMAND ${KO_MAKE_RECURSIVE} -j${PARALLEL_JOBS}
-    INSTALL_COMMAND ${KO_MAKE_RECURSIVE} -j${PARALLEL_JOBS} install
+list(APPEND BUILD_CMD COMMAND ninja)
+
+list(APPEND INSTALL_CMD COMMAND ${CMAKE_COMMAND} --install .)
+
+if(NOT MONOLIBTIC)
+    append_shared_lib_install_commands(INSTALL_CMD png16 VERSION 16)
+endif()
+
+external_project(
+    DOWNLOAD URL dabdabca28f211feeba199d93235c703
+    https://github.com/pnggroup/libpng/archive/refs/tags/v1.6.43.tar.gz
+    PATCH_FILES ${PATCH_FILES}
+    CMAKE_ARGS ${CMAKE_ARGS}
+    BUILD_COMMAND ${BUILD_CMD}
+    INSTALL_COMMAND ${INSTALL_CMD}
 )

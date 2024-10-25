@@ -1,38 +1,26 @@
-cmake_minimum_required(VERSION 3.5.1)
-project(zstd LANGUAGES)
-
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_LIST_DIR}/../cmake_modules")
-include("koreader_thirdparty_common")
-include("koreader_thirdparty_git")
-
-assert_var_defined(CC)
-assert_var_defined(CXX)
-assert_var_defined(AR)
-assert_var_defined(CFLAGS)
-assert_var_defined(LDFLAGS)
-
-ep_get_source_dir(SOURCE_DIR)
-ep_get_binary_dir(BINARY_DIR)
-
-# This a pure Makefile buildsystem, don't enforce CFLAGS via command line args, the buildsystem needs to be able to modify it.
-set(BUILD_ENV "CFLAGS=${CFLAGS}" "LDFLAGS=${LDFLAGS}")
-
-set(BUILD_CMD env ${BUILD_ENV} ${KO_MAKE_RECURSIVE} -j${PARALLEL_JOBS} V=1 "CC=${CC}" "CXX=${CXX}" "AR=${AR}" lib-release)
-set(INSTALL_CMD env ${BUILD_ENV} ${KO_MAKE_RECURSIVE} -C lib -j${PARALLEL_JOBS} V=1 "CC=${CC}" "CXX=${CXX}" "AR=${AR}" "prefix=${BINARY_DIR}" install)
-
-ko_write_gitclone_script(
-    GIT_CLONE_SCRIPT_FILENAME
-    https://github.com/facebook/zstd.git
-    tags/v1.5.5
-    ${SOURCE_DIR}
+list(APPEND CMAKE_ARGS
+    -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
+    # Project options.
+    -DZSTD_BUILD_PROGRAMS=FALSE
+    -DZSTD_BUILD_SHARED=$<NOT:$<BOOL:${MONOLIBTIC}>>
+    -DZSTD_BUILD_STATIC=$<BOOL:${MONOLIBTIC}>
+    -DZSTD_LEGACY_SUPPORT=FALSE
+    -DZSTD_MULTITHREAD_SUPPORT=FALSE
 )
 
-include(ExternalProject)
-ExternalProject_Add(
-    ${PROJECT_NAME}
-    DOWNLOAD_COMMAND ${CMAKE_COMMAND} -P ${GIT_CLONE_SCRIPT_FILENAME}
-    BUILD_IN_SOURCE 1
-    CONFIGURE_COMMAND ""
-    BUILD_COMMAND COMMAND ${BUILD_CMD}
-    INSTALL_COMMAND COMMAND ${INSTALL_CMD}
+list(APPEND BUILD_CMD COMMAND ninja)
+
+list(APPEND INSTALL_CMD COMMAND ${CMAKE_COMMAND} --install .)
+
+if(NOT MONOLIBTIC)
+    append_shared_lib_install_commands(INSTALL_CMD zstd VERSION 1)
+endif()
+
+external_project(
+    DOWNLOAD URL 5a473726b3445d0e5d6296afd1ab6854
+    https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-1.5.6.tar.gz
+    SOURCE_SUBDIR build/cmake
+    CMAKE_ARGS ${CMAKE_ARGS}
+    BUILD_COMMAND ${BUILD_CMD}
+    INSTALL_COMMAND ${INSTALL_CMD}
 )

@@ -1,38 +1,32 @@
-cmake_minimum_required(VERSION 3.5.1)
-project(freetype2 LANGUAGES)
+list(APPEND PATCH_FILES fix_meson_bzip2_option.patch)
 
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_LIST_DIR}/../cmake_modules")
-include("koreader_thirdparty_common")
-include("koreader_thirdparty_git")
-
-assert_var_defined(CXX)
-assert_var_defined(CXXFLAGS)
-assert_var_defined(LDFLAGS)
-
-ep_get_source_dir(SOURCE_DIR)
-ep_get_binary_dir(BINARY_DIR)
-
-set(CFG_ENV_VAR "CC=${CC}" "CXX=${CXX}" "CFLAGS=${CFLAGS}" "CXXFLAGS=${CXXFLAGS}" "LDFLAGS=${LDFLAGS}")
-set(CFG_OPTS --prefix=${BINARY_DIR} --libdir=${BINARY_DIR}/lib --disable-static --enable-shared --with-zlib=no --with-bzip2=no --with-brotli=no --with-png=no --with-harfbuzz=no --host=${CHOST})
-list(APPEND CFG_CMD COMMAND env ${CFG_ENV_VAR} ${SOURCE_DIR}/configure ${CFG_OPTS})
-
-if(DEFINED ENV{ANDROID})
-    list(APPEND CFG_CMD COMMAND ${ANDROID_LIBTOOL_FIX_CMD})
-endif()
-
-ko_write_gitclone_script(
-    GIT_CLONE_SCRIPT_FILENAME
-    https://gitlab.com/koreader/freetype2.git
-    VER-2-13-2
+list(APPEND CFG_CMD COMMAND
+    ${MESON_SETUP} --default-library=$<IF:$<BOOL:${MONOLIBTIC}>,static,shared>
+    -Dmmap=enabled
+    -Dzlib=disabled
     ${SOURCE_DIR}
 )
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    list(APPEND CMAKE_ARGS -DFT_ENABLE_ERROR_STRINGS=TRUE)
+endif()
 
-include(ExternalProject)
-ExternalProject_Add(
-    ${PROJECT_NAME}
-    DOWNLOAD_COMMAND ${CMAKE_COMMAND} -P ${GIT_CLONE_SCRIPT_FILENAME}
-    PATCH_COMMAND ./autogen.sh
+list(APPEND BUILD_CMD COMMAND ninja)
+
+list(APPEND INSTALL_CMD COMMAND ${MESON_INSTALL})
+
+if(NOT MONOLIBTIC)
+    set(LIB_SPEC freetype VERSION 6)
+    if(APPLE)
+        append_shared_lib_fix_commands(INSTALL_CMD ${LIB_SPEC} ID)
+    endif()
+    append_shared_lib_install_commands(INSTALL_CMD ${LIB_SPEC})
+endif()
+
+external_project(
+    DOWNLOAD URL 4425315beb50f913ae12d643e4e121e1
+    https://github.com/freetype/freetype/archive/refs/tags/VER-2-13-3.tar.gz
+    PATCH_FILES ${PATCH_FILES}
     CONFIGURE_COMMAND ${CFG_CMD}
-    BUILD_COMMAND ${KO_MAKE_RECURSIVE} -j${PARALLEL_JOBS}
-    INSTALL_COMMAND ${KO_MAKE_RECURSIVE} -j${PARALLEL_JOBS} install
+    BUILD_COMMAND ${BUILD_CMD}
+    INSTALL_COMMAND ${INSTALL_CMD}
 )

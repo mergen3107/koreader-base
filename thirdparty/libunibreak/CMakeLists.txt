@@ -1,41 +1,28 @@
-cmake_minimum_required(VERSION 3.5.1)
-project(libunibreak LANGUAGES)
-
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/../cmake_modules")
-include("koreader_thirdparty_common")
-include("koreader_thirdparty_git")
-
-assert_var_defined(CC)
-assert_var_defined(CFLAGS)
-assert_var_defined(CHOST)
-assert_var_defined(LDFLAGS)
-
-ep_get_source_dir(SOURCE_DIR)
-ep_get_binary_dir(BINARY_DIR)
-
-list(APPEND PATCH_CMD COMMAND ${KO_PATCH} ${CMAKE_CURRENT_SOURCE_DIR}/add_lb_get_char_class.patch)
-
-set(CFG_ENV_VAR "CC=${CC}" "CFLAGS=${CFLAGS}" "LDFLAGS=${LDFLAGS}")
-set(CFG_OPTS --prefix=${BINARY_DIR} --libdir=${BINARY_DIR}/lib --disable-static --enable-shared --host=${CHOST})
-list(APPEND CFG_CMD COMMAND env ${CFG_ENV_VAR} ${SOURCE_DIR}/autogen.sh ${CFG_OPTS})
-
-if(DEFINED ENV{ANDROID})
-    list(APPEND CFG_CMD COMMAND ${ANDROID_LIBTOOL_FIX_CMD})
-endif()
-
-ko_write_gitclone_script(
-    GIT_CLONE_SCRIPT_FILENAME
-    https://github.com/adah1972/libunibreak.git
-    tags/libunibreak_5_1
-    ${SOURCE_DIR}
+list(APPEND CFG_CMD COMMAND env)
+append_autotools_vars(CFG_CMD)
+list(APPEND CFG_CMD
+    ${SOURCE_DIR}/configure --host=${CHOST} --prefix=${STAGING_DIR}
+    --disable-$<IF:$<BOOL:${MONOLIBTIC}>,shared,static>
+    --enable-$<IF:$<BOOL:${MONOLIBTIC}>,static,shared>
+    --enable-silent-rules
 )
 
-include(ExternalProject)
-ExternalProject_Add(
-    ${PROJECT_NAME}
-    DOWNLOAD_COMMAND ${CMAKE_COMMAND} -P ${GIT_CLONE_SCRIPT_FILENAME}
-    PATCH_COMMAND ${PATCH_CMD}
+list(APPEND BUILD_CMD COMMAND make)
+
+list(APPEND INSTALL_CMD COMMAND make install)
+
+if(NOT MONOLIBTIC)
+    set(LIB_SPEC unibreak VERSION 6)
+    if(APPLE)
+        append_shared_lib_fix_commands(INSTALL_CMD ${LIB_SPEC} ID)
+    endif()
+    append_shared_lib_install_commands(INSTALL_CMD ${LIB_SPEC})
+endif()
+
+external_project(
+    DOWNLOAD URL 8df410d010e03de1a339a400a920335e
+    https://github.com/adah1972/libunibreak/releases/download/libunibreak_6_1/libunibreak-6.1.tar.gz
     CONFIGURE_COMMAND ${CFG_CMD}
-    BUILD_COMMAND ${KO_MAKE_RECURSIVE} -j${PARALLEL_JOBS}
-    INSTALL_COMMAND ${KO_MAKE_RECURSIVE} -j${PARALLEL_JOBS} install
+    BUILD_COMMAND ${BUILD_CMD}
+    INSTALL_COMMAND ${INSTALL_CMD}
 )

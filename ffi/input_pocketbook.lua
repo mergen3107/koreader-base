@@ -15,13 +15,20 @@ require("ffi/inkview_h")
 -- emulates those in a semaphore step-locked thread.
 local compat, compat2 = inkview, inkview
 if not pcall(function() local _ = inkview.PrepareForLoop end) then
-    compat = ffi.load("inkview-compat")
+    compat = ffi.loadlib("inkview-compat")
     compat2 = compat
 elseif not pcall(function() local _ = inkview.GetTouchInfoI end) then
-    compat2 = ffi.load("inkview-compat")
+    compat2 = ffi.loadlib("inkview-compat")
 end
 
-local input = {}
+local input = {
+    -- NOP
+    fakeTapInput = function() end,
+    -- our open implementation doesn't exactly allow for a 1:1 match to the standard API...
+    close = function() end,
+    -- Tell front that we're a custom imp with no concept of paths/fd
+    is_ffi = true,
+}
 
 local ts
 -- Create new 'ts' with current timestamp.
@@ -466,8 +473,6 @@ function input.waitForEvent(sec, usec)
     -- Timed out
     return false, C.ETIME
 end
-
-function input.fakeTapInput() end
 
 function input.closeAll()
     eventq = nil

@@ -1,56 +1,26 @@
-cmake_minimum_required(VERSION 3.5.1)
-project(lunasvg LANGUAGES)
+list(APPEND PATCH_FILES extended.patch)
 
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_LIST_DIR}/../cmake_modules")
-include("koreader_thirdparty_common")
-include("koreader_thirdparty_git")
-
-assert_var_defined(CPPFLAGS)
-assert_var_defined(CFLAGS)
-assert_var_defined(CXXFLAGS)
-assert_var_defined(LDFLAGS)
-
-ep_get_source_dir(SOURCE_DIR)
-ep_get_binary_dir(BINARY_DIR)
-
-# Make sure the daisy-chain once again picks up our toolchain file...
-if(DEFINED ENV{CMAKE_TCF})
-    list(APPEND CMAKE_ARGS "$ENV{CMAKE_TCF}")
-endif()
-# CMake hell.
-# We expect lib later on in Makefile.third, even on multilib systems...
-list(APPEND CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=${BINARY_DIR}")
-list(APPEND CMAKE_ARGS "-DCMAKE_INSTALL_LIBDIR=lib")
-list(APPEND CMAKE_ARGS "-DCMAKE_INSTALL_INCLUDEDIR=include")
-list(APPEND CMAKE_ARGS "-DCMAKE_SKIP_RPATH=TRUE")
-#list(APPEND CMAKE_ARGS "-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON")
-# Honor the env, dammit.
-list(APPEND CMAKE_ARGS "-DCMAKE_EXE_LINKER_FLAGS=${LDFLAGS}")
-list(APPEND CMAKE_ARGS "-DCMAKE_MODULE_LINKER_FLAGS=${LDFLAGS}")
-list(APPEND CMAKE_ARGS "-DCMAKE_SHARED_LINKER_FLAGS=${LDFLAGS}")
-list(APPEND CMAKE_ARGS "-DCMAKE_C_FLAGS=${CPPFLAGS} ${CFLAGS}")
-list(APPEND CMAKE_ARGS "-DCMAKE_CXX_FLAGS=${CPPFLAGS} ${CXXFLAGS}")
-
-# Actual LunaSVG build options
-list(APPEND CMAKE_ARGS "-DBUILD_SHARED_LIBS=ON")
-
-list(APPEND PATCH_CMD COMMAND ${KO_PATCH} ${CMAKE_CURRENT_SOURCE_DIR}/extended.patch)
-list(APPEND PATCH_CMD COMMAND cp -rpv ${CMAKE_CURRENT_SOURCE_DIR}/xtended ${SOURCE_DIR}/)
-
-ko_write_gitclone_script(
-    GIT_CLONE_SCRIPT_FILENAME
-    https://github.com/sammycage/lunasvg.git
-    59d6f6ba835c1b7c7a0f9d4ea540ec3981777885
-    ${SOURCE_DIR}
+list(APPEND CMAKE_ARGS
+    -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
+    -DBUILD_SHARED_LIBS=$<NOT:$<BOOL:${MONOLIBTIC}>>
+    # Project options.
+    -DXTENDED_DIR=${CMAKE_CURRENT_SOURCE_DIR}/xtended
 )
 
-include(ExternalProject)
-ExternalProject_Add(
-    lunasvg
-    DOWNLOAD_COMMAND ${CMAKE_COMMAND} -P ${GIT_CLONE_SCRIPT_FILENAME}
-    PATCH_COMMAND COMMAND ${PATCH_CMD}
-    CMAKE_ARGS "${CMAKE_ARGS}"
-    CMAKE_GENERATOR "Unix Makefiles"
-    BUILD_COMMAND ${KO_MAKE_RECURSIVE} -j${PARALLEL_JOBS}
-    INSTALL_COMMAND ${KO_MAKE_RECURSIVE} -j${PARALLEL_JOBS} install
+list(APPEND BUILD_CMD COMMAND ninja)
+
+list(APPEND INSTALL_CMD COMMAND ${CMAKE_COMMAND} --install .)
+
+if(NOT MONOLIBTIC)
+    append_shared_lib_install_commands(INSTALL_CMD lunasvg)
+endif()
+
+external_project(
+    DOWNLOAD GIT 59d6f6ba835c1b7c7a0f9d4ea540ec3981777885
+    https://github.com/sammycage/lunasvg.git
+    PATCH_FILES ${PATCH_FILES}
+    CMAKE_ARGS ${CMAKE_ARGS}
+    BUILD_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/xtended/*
+    BUILD_COMMAND ${BUILD_CMD}
+    INSTALL_COMMAND ${INSTALL_CMD}
 )

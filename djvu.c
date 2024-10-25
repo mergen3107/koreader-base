@@ -72,16 +72,6 @@ typedef enum DjvuZoneId {
 	N_ZI
 } DjvuZoneId;
 
-static const char *djvuZoneName[N_ZI] = {
-	"page",
-	"column",
-	"region",
-	"para",
-	"line",
-	"word",
-	"char"
-};
-
 typedef enum DjvuZoneSexpIdx {
 	SI_ZONE_NAME,
 	SI_ZONE_XMIN,
@@ -107,13 +97,36 @@ int int_from_miniexp_nth(int n, miniexp_t sexp) {
 	return (miniexp_numberp(s) ? miniexp_to_int(s) : ((int)0));
 }
 
+#ifdef DEBUG
+
+static const char *render_mode_str(ddjvu_render_mode_t mode) {
+    switch (mode) {
+    case DDJVU_RENDER_COLOR:
+        return "color";
+    case DDJVU_RENDER_BLACK:
+        return "black";
+    case DDJVU_RENDER_COLORONLY:
+        return "coloronly";
+    case DDJVU_RENDER_MASKONLY:
+        return "maskonly";
+    case DDJVU_RENDER_BACKGROUND:
+        return "background";
+    case DDJVU_RENDER_FOREGROUND:
+        return "foreground";
+    default:
+        return "???";
+    }
+}
+
+#endif
+
 static int handle(lua_State *L, ddjvu_context_t *ctx, int wait)
 {
 	const ddjvu_message_t *msg;
 	if (!ctx)
 		return -1;
 	if (wait)
-		msg = ddjvu_message_wait(ctx);
+		ddjvu_message_wait(ctx);
 	while ((msg = ddjvu_message_peek(ctx)))
 	{
 	  switch(msg->m_any.tag)
@@ -203,6 +216,9 @@ static int closeDocument(lua_State *L) {
 static int setColorRendering(lua_State *L) {
 	DjvuDocument *doc = (DjvuDocument*) luaL_checkudata(L, 1, "djvudocument");
 	int color = lua_toboolean(L, 2);
+#ifdef DEBUG
+	printf("%s: %s\n", __func__, color ? "color" : "grey");
+#endif
 	if (doc->pixelformat != NULL) {
 		ddjvu_format_release(doc->pixelformat);
 		doc->pixelformat = NULL;
@@ -507,10 +523,7 @@ static int getPageText(lua_State *L) {
 		return luaL_error(L, "cannot get page #%d information", pageno);
 
 	/* start retrieving page text */
-	miniexp_t sexp, se_line, se_word;
-	int i = 1, j = 1, counter_l = 1, counter_w=1,
-		nr_line = 0, nr_word = 0;
-	const char *word = NULL;
+	miniexp_t sexp;
 
 	while ((sexp = ddjvu_document_get_pagetext(doc->doc_ref, pageno-1, "word"))
 				== miniexp_dummy) {
@@ -536,9 +549,10 @@ static int closePage(lua_State *L) {
 static int getPagePix(lua_State *L) {
 	DjvuPage *page = (DjvuPage*) luaL_checkudata(L, 1, "djvupage");
 	KOPTContext *kctx = (KOPTContext*) lua_topointer(L, 2);
+	ddjvu_render_mode_t mode = (int) luaL_checkint(L, 3);
 	ddjvu_rect_t prect;
 	ddjvu_rect_t rrect;
-	int px, py, pw, ph, rx, ry, rw, rh, status;
+	int px, py, pw, ph, rx, ry, rw, rh;
 
 	px = 0;
     py = 0;
@@ -560,7 +574,11 @@ static int getPagePix(lua_State *L) {
     rrect.y = ry * scale;
     rrect.w = rw * scale;
     rrect.h = rh * scale;
-    printf("rendering page:%d,%d,%d,%d\n",rrect.x,rrect.y,rrect.w,rrect.h);
+#ifdef DEBUG
+    printf("%s: rendering page: %u (%d,%d,%d,%d) [%s:%s]\n", __func__, page->num,
+           rrect.x, rrect.y, rrect.w, rrect.h,
+           page->doc->pixelsize == 3 ? "color" : "grey", render_mode_str(mode));
+#endif
 
 	WILLUSBITMAP *dst = &kctx->src;
 	bmp_init(dst);
@@ -575,7 +593,7 @@ static int getPagePix(lua_State *L) {
 	}
 
 	ddjvu_format_set_row_order(page->doc->pixelformat, 1);
-	ddjvu_page_render(page->page_ref, 0, &prect, &rrect, page->doc->pixelformat,
+	ddjvu_page_render(page->page_ref, mode, &prect, &rrect, page->doc->pixelformat,
 		bmp_bytewidth(dst), (char *) dst->data);
 
 	kctx->page_width = dst->width;
@@ -613,7 +631,11 @@ static int reflowPage(lua_State *L) {
 	rrect.y = ry * scale;
 	rrect.w = rw * scale;
 	rrect.h = rh * scale;
-	printf("rendering page:%d,%d,%d,%d\n",rrect.x,rrect.y,rrect.w,rrect.h);
+#ifdef DEBUG
+        printf("%s: rendering page: %u (%d,%d,%d,%d) [%s:%s]\n", __func__, page->num,
+               rrect.x, rrect.y, rrect.w, rrect.h,
+               page->doc->pixelsize == 3 ? "color" : "grey", render_mode_str(mode));
+#endif
 	kctx->zoom = scale;
 
 	WILLUSBITMAP *src = &kctx->src;
@@ -623,23 +645,23 @@ static int reflowPage(lua_State *L) {
 	src->bpp = 8*page->doc->pixelsize;
 
 	bmp_alloc(src);
-	if (src->bpp == 8) {
-		int ii;
-		for (ii = 0; ii < 256; ii++)
-		src->red[ii] = src->blue[ii] = src->green[ii] = ii;
-	}
+	if (src->bpp == 8)
+		for (int ii = 0; ii < 256; ii++)
+			src->red[ii] = src->blue[ii] = src->green[ii] = ii;
 
 	ddjvu_format_set_row_order(page->doc->pixelformat, 1);
 
 	status = ddjvu_page_render(page->page_ref, mode, &prect, &rrect, page->doc->pixelformat,
 			bmp_bytewidth(src), (char *) src->data);
+	if (!status)
+		return luaL_error(L, "%s: ddjvu_page_render failed", __func__);
 
 	if (kctx->precache) {
 		pthread_t rf_thread;
 		pthread_attr_t attr;
 		pthread_attr_init(&attr);
 		pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-		pthread_create(&rf_thread, &attr, (void *(*) (void *))k2pdfopt_reflow_bmp, (void*)kctx);
+		pthread_create(&rf_thread, &attr, (void *)k2pdfopt_reflow_bmp, kctx);
 		pthread_attr_destroy(&attr);
 	} else {
 		k2pdfopt_reflow_bmp(kctx);
@@ -709,7 +731,7 @@ static int drawPage(lua_State *L) {
 	 * So we don't set rotation here.
 	 */
 
-	if (!ddjvu_page_render(page->page_ref, djvu_render_mode, &pagerect, &renderrect, page->doc->pixelformat, bb->w*page->doc->pixelsize, imagebuffer)) {
+	if (!ddjvu_page_render(page->page_ref, djvu_render_mode, &pagerect, &renderrect, page->doc->pixelformat, bb->w*page->doc->pixelsize, (void *)imagebuffer)) {
 		// Clear to white on failure
 		memset(imagebuffer, 0xFF, bbsize);
 	}

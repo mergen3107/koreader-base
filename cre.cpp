@@ -813,7 +813,24 @@ static int getDocumentProps(lua_State *L) {
 	lua_pushstring(L, UnicodeToLocal(doc->text_view->getKeywords()).c_str());
 	lua_rawset(L, -3);
 
+	lua_pushstring(L, "identifiers");
+	lua_pushstring(L, UnicodeToLocal(doc->text_view->getIdentifiers()).c_str());
+	lua_rawset(L, -3);
+
 	return 1;
+}
+
+static int setAltDocumentProp(lua_State *L) {
+    CreDocument *doc = (CreDocument*) luaL_checkudata(L, 1, "credocument");
+    const char *prop = luaL_checkstring(L, 2);
+    if (lua_isstring(L, 3)) {
+        const char *value = luaL_checkstring(L, 3);
+        doc->text_view->getAltDocProps()->setString(prop, value);
+    }
+    else {
+        doc->text_view->getAltDocProps()->deleteProperty(prop);
+    }
+    return 0;
 }
 
 static int getDocumentRenderingHash(lua_State *L) {
@@ -1334,7 +1351,10 @@ static int getPageMapCurrentPageLabel(lua_State *L) {
     else if (idx >= nb)
         idx = nb - 1;
     lua_pushstring(L, UnicodeToLocal(pagemap->getChild(idx)->getLabel()).c_str());
-    return 1;
+    // Push index and count as we have them, they might be of use to compute "pages left"
+    lua_pushinteger(L, idx+1);
+    lua_pushinteger(L, nb);
+    return 3;
 }
 
 static int getPageMapXPointerPageLabel(lua_State *L) {
@@ -1557,6 +1577,14 @@ static int setHeaderInfo(lua_State *L) {
 
 	doc->text_view->setPageHeaderInfo(info);
 
+	return 0;
+}
+
+static int setPageInfoOverride(lua_State *L) {
+	CreDocument *doc = (CreDocument*) luaL_checkudata(L, 1, "credocument");
+	const char *pageinfo = luaL_checkstring(L, 2);
+
+	doc->text_view->setPageInfoOverride(lString32(pageinfo));
 	return 0;
 }
 
@@ -1945,6 +1973,18 @@ static int getWordFromPosition(lua_State *L) {
 	return 1;
 }
 
+// Unicode codepoint to use as the image placeholder when includeImages requested when getting text.
+// (passed to ldomXRange::getRangeText(), 0 means no inclusion of images even if requested)
+// This is set as a global variable so all functions use the same char.
+static lChar32 imageReplacementChar = 0;
+
+static int setImageReplacementChar(lua_State *L) {
+    int codepoint = luaL_checkint(L, 1);
+    imageReplacementChar = codepoint;
+    return 0;
+}
+
+
 static int getTextFromXPointers(lua_State *L) {
 	CreDocument *doc = (CreDocument*) luaL_checkudata(L, 1, "credocument");
 	const char* pos0 = luaL_checkstring(L, 2);
@@ -1959,6 +1999,12 @@ static int getTextFromXPointers(lua_State *L) {
 	bool drawSegmentedSelection = drawSelection;
 	if (lua_isboolean(L, 5)) {
 		drawSegmentedSelection = lua_toboolean(L, 5);
+	}
+	// If includeImages, the drawn segments will include areas with images,
+	// and the text will have imageReplacementChar as images placeholders.
+	bool includeImages = false;
+	if (lua_isboolean(L, 6)) {
+		includeImages = lua_toboolean(L, 6);
 	}
 
 	LVDocView *tv = doc->text_view;
@@ -1981,13 +2027,15 @@ static int getTextFromXPointers(lua_State *L) {
 				r.getEnd().setOffset(offset + 1);
 		}
 
+		int rangeFlags = 0;
 		if (drawSelection) {
-			int rangeFlags = drawSegmentedSelection ? 0x11 : 0x01;
-			r.setFlags(rangeFlags);
-			tv->selectRange(r);
+			rangeFlags = drawSegmentedSelection ? 0x11 : 0x01;
+			if (includeImages)
+				rangeFlags |= 0x100;
 		}
-
-		lString32 selText = r.getRangeText('\n', 8192);
+		r.setFlags(rangeFlags);
+		tv->selectRange(r);
+		lString32 selText = r.getRangeText('\n', includeImages?imageReplacementChar:0);
 		lua_pushstring(L, UnicodeToLocal(selText).c_str());
         return 1;
     }
@@ -2010,9 +2058,14 @@ static int getTextFromPositions(lua_State *L) {
 	if (lua_isboolean(L, 7)) {
 		drawSegmentedSelection = lua_toboolean(L, 7);
 	}
+	// If includeImages, the drawn segments will include areas with images,
+	// and the text will have imageReplacementChar as images placeholders.
+	bool includeImages = false;
+	if (lua_isboolean(L, 8)) {
+		includeImages = lua_toboolean(L, 8);
+	}
 
 	LVDocView *tv = doc->text_view;
-	lvRect margin = tv->getPageMargins();
 
 	lvPoint startpt(x0, y0);
 	lvPoint endpt(x1, y1);
@@ -2068,7 +2121,6 @@ static int getTextFromPositions(lua_State *L) {
 			}
 			ldomNode * node = r.getStart().getNode();
 			lString32 text = node->getText();
-			int textLen = text.length();
 			if (grab_prev) {
 				r.getStart().prevVisibleWordStart();
 			}
@@ -2078,8 +2130,11 @@ static int getTextFromPositions(lua_State *L) {
 		}
 
 		int rangeFlags = 0;
-		if (drawSelection) // have crengine do native highlight of selection
+		if (drawSelection) { // have crengine do native highlight of selection
 			rangeFlags = drawSegmentedSelection ? 0x11 : 0x01;
+			if (includeImages)
+				rangeFlags |= 0x100;
+		}
 		r.setFlags(rangeFlags);
 		tv->selectRange(r);
 
@@ -2090,7 +2145,10 @@ static int getTextFromPositions(lua_State *L) {
 		lString32 posText;
 		tv->getBookmarkPosText(startp, titleText, posText);
 		*/
-		lString32 selText = r.getRangeText( '\n', 8192 );
+
+		// If requested, include image placeholders in the text, and gather image nodes
+		LVArray<ldomNode*> imageNodes;
+		lString32 selText = r.getRangeText( '\n', includeImages?imageReplacementChar:0, &imageNodes);
 
 		lua_pushstring(L, "text");
 		lua_pushstring(L, UnicodeToLocal(selText).c_str());
@@ -2112,6 +2170,18 @@ static int getTextFromPositions(lua_State *L) {
 		lua_pushnumber(L, 1.0*page/(pages-1));
 		lua_rawset(L, -3);
 		*/
+
+		// If we got image nodes, return a list of their xpointers
+		if ( imageNodes.length() > 0 ) {
+			lua_pushstring(L, "images");
+			lua_createtable(L, imageNodes.length(), 0);
+			for (int i = 0; i < imageNodes.length(); i++) {
+				ldomNode * node = imageNodes[i];
+				lua_pushstring(L, UnicodeToLocal(ldomXPointerEx(node, 0).toString()).c_str());
+				lua_rawseti(L, -2, i+1);
+			}
+			lua_rawset(L, -3);
+		}
 		return 1;
 	}
     return 0;
@@ -2121,8 +2191,11 @@ static int extendXPointersToSentenceSegment(lua_State *L) {
     CreDocument *doc = (CreDocument*) luaL_checkudata(L, 1, "credocument");
     const char* pos0 = luaL_checkstring(L, 2);
     const char* pos1 = luaL_checkstring(L, 3);
+    bool includeImages = false;
+    if (lua_isboolean(L, 4)) {
+        includeImages = lua_toboolean(L, 4);
+    }
 
-    LVDocView *tv = doc->text_view;
     ldomDocument *dv = doc->dom_doc;
     ldomXPointerEx startp = dv->createXPointer(lString32(pos0));
     ldomXPointerEx endp = dv->createXPointer(lString32(pos1));
@@ -2201,7 +2274,7 @@ static int extendXPointersToSentenceSegment(lua_State *L) {
 
     // Return updated text and xpointers
     ldomXRange r(startp, endp);
-    lString32 text = r.getRangeText( '\n', 8192 );
+    lString32 text = r.getRangeText( '\n', includeImages?imageReplacementChar:0);
     lua_createtable(L, 0, 3);
     lua_pushstring(L, "text");
     lua_pushstring(L, UnicodeToLocal(text).c_str());
@@ -2285,10 +2358,10 @@ bool docToWindowRect(LVDocView *tv, lvRect &rc) {
 // that a ldomXRange spans on the page.
 // Each segment is pushed as a table {x0=, y0=, x1=, y1=}.
 // The Lua stack must be prepared as a table to receive them.
-void lua_pushSegmentsFromRange(lua_State *L, CreDocument *doc, ldomXRange *range) {
+void lua_pushSegmentsFromRange(lua_State *L, CreDocument *doc, ldomXRange *range, bool includeImages=false) {
     LVDocView *tv = doc->text_view;
     LVArray<lvRect> rects;
-    range->getSegmentRects(rects);
+    range->getSegmentRects(rects, includeImages);
     int lcount = 1;
     for (int i=0; i<rects.length(); i++) {
         lvRect r = rects[i];
@@ -2404,6 +2477,11 @@ static int getWordBoxesFromPositions(lua_State *L) {
 		// lines, which makes out a nicer display of text selection.
 		getSegments = lua_toboolean(L, 4);
 	}
+	// If includeImages, the returned segments will include areas with images.
+	bool includeImages = false;
+	if (lua_isboolean(L, 5)) {
+		includeImages = lua_toboolean(L, 5);
+	}
 
 	LVDocView *tv = doc->text_view;
 	ldomDocument *dv = doc->dom_doc;
@@ -2423,7 +2501,7 @@ static int getWordBoxesFromPositions(lua_State *L) {
 		// (to select following puncutations, etc...)
 		if (getSegments) {
 			lua_newtable(L); // We may skip rects in the range, can't predict the pre-alloc size without overshot
-			lua_pushSegmentsFromRange(L, doc, &r);
+			lua_pushSegmentsFromRange(L, doc, &r, includeImages);
 			return 1;
 		}
 
@@ -2643,7 +2721,7 @@ static int getPageLinks(lua_State *L) {
 	lua_newtable(L); // all links (actual entries may be less than links.length(), so, no pre-alloc)
 
 	ldomXRangeList links;
-	ldomXRangeList & sel = doc->text_view->getDocument()->getSelections();
+	// ldomXRangeList & sel = doc->text_view->getDocument()->getSelections();
 
 	doc->text_view->getCurrentPageLinks( links );
 	int linkCount = links.length();
@@ -2712,7 +2790,7 @@ static int getPageLinks(lua_State *L) {
 			ldomXRange linkRange = ldomXRange(*links[i]);
 			lua_pushstring(L, "segments");
 			lua_newtable(L); // all segments (again, we may skip rects in the range, so, no pre-alloc)
-			lua_pushSegmentsFromRange(L, doc, &linkRange);
+			lua_pushSegmentsFromRange(L, doc, &linkRange, true); // include images
 			lua_rawset(L, -3); // adds "segments" = table
 
 			lua_rawseti(L, -2, linkNum++);
@@ -2733,7 +2811,6 @@ static bool _isLinkToFootnote(CreDocument *doc, const lString32 source_xpointer,
             const int flags, const int maxTextSize, lString32 &reason,
             lString32 &extendedStopReason, ldomXRange &extendedRange)
 {
-    ldomDocument *dv = doc->dom_doc;
     const ldomXPointerEx sourceXP = ldomXPointerEx(doc->dom_doc->createXPointer(source_xpointer));
     const ldomXPointerEx targetXP = ldomXPointerEx(doc->dom_doc->createXPointer(target_xpointer));
     ldomNode *sourceNode = sourceXP.getNode();
@@ -2979,8 +3056,27 @@ static bool _isLinkToFootnote(CreDocument *doc, const lString32 source_xpointer,
             // This will also discard a link containing a single image pointing
             // to a bigger size image (it could also be a small image linking
             // to a footnote, but well...)
-            reason = "source has no text content";
-            return false;
+            // Anyway, as it happens many Chinese books use an image as the footnote
+            // link, check if it may be an image, and so non-empty (other checks
+            // targetting text below won't check anymore for that, but it might
+            // be enough to accept it if some other conditions are met, or
+            // if likelyFootnote=true provided)
+            ldomXPointerEx sourceEndXP = sourceXP;
+            // This should pass over an image
+            while (true) {
+                if ( sourceEndXP.nextSibling() )
+                    break;
+                if ( !sourceEndXP.parent() )
+                    break;
+            }
+            ldomXRange fullNodeRange(sourceXP, sourceEndXP);
+            sourceText = fullNodeRange.getRangeText( '\n', 'Z');
+                // We force-provide some imageReplacement char, so we get a char where
+                // there is an image, which makes sourceText not empty
+            if ( sourceText.empty() ) {
+                reason = "source has no text nor image content";
+                return false;
+            }
         }
         if ( finalNode && !finalNode->isNull() ) {
             if ( sourceText == finalNode->getText() ) {
@@ -3366,28 +3462,33 @@ static bool _isLinkToFootnote(CreDocument *doc, const lString32 source_xpointer,
         }
     }
 
-    // Target text must be less than the provided maxTextSize
-    if (flags & 0x8000) {
-        int size = 0;
-        ldomXPointerEx curText;
-        ldomXPointerEx endText;
-        if ( !extendedRange.isNull() ) {
-            curText = extendedRange.getStart();
-            endText = extendedRange.getEnd();
+    // Target text must not be empty - and (if flags & 0x8000) must be less
+    // than the provided maxTextSize
+    int size = 0;
+    int hasContent = false;
+    ldomXPointerEx curText;
+    ldomXPointerEx endText;
+    if ( !extendedRange.isNull() ) {
+        curText = extendedRange.getStart();
+        endText = extendedRange.getEnd();
+    }
+    else {
+        ldomNode * finalNode = targetXP.getFinalNode();
+        if ( finalNode && !finalNode->isNull() )
+            curText = ldomXPointerEx(finalNode, 0);
+        else
+            curText = targetXP;
+        endText = curText; // copy
+        endText.lastInnerTextNode();
+    }
+    // Walk all text nodes till endText
+    while (curText.nextText() && curText.compare(endText) <= 0) {
+        lString32 nodeText = curText.getText();
+        size += nodeText.length();
+        if ( !hasContent ) {
+            hasContent = !(nodeText.trim().empty());
         }
-        else {
-            ldomNode * finalNode = targetXP.getFinalNode();
-            if ( finalNode && !finalNode->isNull() )
-                curText = ldomXPointerEx(finalNode, 0);
-            else
-                curText = targetXP;
-            endText = curText; // copy
-            endText.lastInnerTextNode();
-        }
-        // Walk all text nodes till endText
-        while (curText.nextText() && curText.compare(endText) <= 0) {
-            lString32 nodeText = curText.getText();
-            size += nodeText.length();
+        if (flags & 0x8000) { // Target text must be less than the provided maxTextSize
             if (size > maxTextSize) {
                 reason = "target text is too large";
                 return false;
@@ -3395,7 +3496,14 @@ static bool _isLinkToFootnote(CreDocument *doc, const lString32 source_xpointer,
                 // on the non-extended one?
             }
         }
-        // printf("target size is %d\n", size);
+        else if ( hasContent ) {
+            break; // no need to walk further
+        }
+    }
+    // printf("target size is %d\n", size);
+    if ( !hasContent ) {
+        reason = "target text is empty or only spaces";
+        return false;
     }
 
     if ( likelyFootnote ) {
@@ -3450,7 +3558,7 @@ static int highlightXPointer(lua_State *L) {
         if (node->isNull())
             return 0;
         ldomXRange * fullNodeRange = new ldomXRange(node, true);
-        fullNodeRange->setFlags(0x11); // draw segmented adjusted selection
+        fullNodeRange->setFlags(0x111); // draw segmented adjusted selection and include images
         sel.add( fullNodeRange ); // highlight it
         lua_pushboolean(L, true);
         return 1;
@@ -3663,9 +3771,9 @@ static int findText(lua_State *L) {
 	const char *l_pattern   = luaL_checkstring(L, 2);
 	lString32 pattern		= lString32(l_pattern);
 	int origin				= luaL_checkint(L, 3);
-	bool reverse			= luaL_checkint(L, 4);
-	bool caseInsensitive	= luaL_checkint(L, 5);
-	bool patternIsRegex    	= luaL_checkint(L, 6);
+	bool reverse			= lua_toboolean(L, 4);
+	bool caseInsensitive	= lua_toboolean(L, 5);
+	bool patternIsRegex		= lua_toboolean(L, 6);
 	int maxHits 			= luaL_checkint(L, 7);
 
     if ( pattern.empty() )
@@ -3759,6 +3867,104 @@ static int findText(lua_State *L) {
     return 0;
 }
 
+static int findAllText(lua_State *L) {
+    CreDocument *doc        = (CreDocument*) luaL_checkudata(L, 1, "credocument");
+    const char *l_pattern   = luaL_checkstring(L, 2);
+    lString32 pattern       = lString32(l_pattern);
+    bool caseInsensitive    = lua_toboolean(L, 3);
+    bool patternIsRegex     = lua_toboolean(L, 4);
+    int maxHits             = luaL_checkint(L, 5);
+    bool getMatchedText     = lua_toboolean(L, 6);
+    int nbWordsContext      = (int)luaL_optint(L, 7, 0);
+
+    if ( pattern.empty() )
+        return 0;
+
+    LVArray<ldomWord> words;
+    if ( doc->text_view->getDocument()->findText( pattern, caseInsensitive, false, -1, -1, words, maxHits, -1, -1, patternIsRegex ) ) {
+        doc->text_view->clearSelection();
+        doc->text_view->selectWords( words );
+        ldomMarkedRangeList * ranges = doc->text_view->getMarkedRanges();
+        if ( ranges && ranges->length() > 0 ) {
+            lua_createtable(L, words.length(), 0); // hold all words
+            for (int i = 0; i < words.length(); i++) {
+                ldomWord word = words[i];
+                lua_createtable(L, 0, 7); // new match
+                lua_pushstring(L, "start");
+                lua_pushstring(L, UnicodeToLocal(word.getStartXPointer().toString()).c_str());
+                lua_rawset(L, -3);
+                lua_pushstring(L, "end");
+                lua_pushstring(L, UnicodeToLocal(word.getEndXPointer().toString()).c_str());
+                lua_rawset(L, -3);
+                if ( getMatchedText ) {
+                    lua_pushstring(L, "matched_text");
+                    lua_pushstring(L, UnicodeToLocal(word.getText()).c_str());
+                    lua_rawset(L, -3);
+
+                    ldomXPointerEx start = word.getStartXPointer();
+                    if ( !start.isVisibleWordStart() ) {
+                        start.prevVisibleWordStart();
+                        ldomXRange rp(start, (ldomXPointerEx)word.getStartXPointer());
+                        lString32 prefix = rp.getRangeText('\n');
+                        lua_pushstring(L, "matched_word_prefix");
+                        lua_pushstring(L, UnicodeToLocal(prefix).c_str());
+                        lua_rawset(L, -3);
+                    }
+
+                    ldomXPointerEx end = word.getEndXPointer();
+                    if ( !end.isVisibleWordEnd() ) {
+                        end.nextVisibleWordEnd();
+                        ldomXRange rn((ldomXPointerEx)word.getEndXPointer(), end);
+                        lString32 suffix = rn.getRangeText('\n');
+                        lua_pushstring(L, "matched_word_suffix");
+                        lua_pushstring(L, UnicodeToLocal(suffix).c_str());
+                        lua_rawset(L, -3);
+                    }
+
+                    if ( nbWordsContext > 0 ) {
+                        ldomXPointerEx prev = start;
+                        for (int i=0; i<nbWordsContext; i++) {
+                            if ( !prev.prevVisibleWordStart() )
+                                break;
+                        }
+                        ldomXRange rp(prev, start);
+                        lString32 prevText = rp.getRangeText('\n');
+                        lua_pushstring(L, "prev_text");
+                        lua_pushstring(L, UnicodeToLocal(prevText).c_str());
+                        lua_rawset(L, -3);
+
+                        // nextVisibleWordEnd() (used here and above) may end up on the root node
+                        // when at end of document, and we may wrap around to the start of the
+                        // document: we must stop and not consider it.
+                        // (No such issue with prev context, as it won't wrap around to end of document.)
+                        ldomXPointerEx next = end;
+                        ldomXPointerEx tmp = end;
+                        for (int i=0; i<nbWordsContext; i++) {
+                            if ( i == 0 && end.getNode()->isRoot() ) // reached when dealing with suffix
+                                break;
+                            if ( !tmp.nextVisibleWordEnd() ) // probably reached the root node
+                                break;
+                            next = tmp;
+                        }
+                        ldomXRange rn(end, next);
+                        lString32 nextText = rn.getRangeText('\n');
+                        lua_pushstring(L, "next_text");
+                        lua_pushstring(L, UnicodeToLocal(nextText).c_str());
+                        lua_rawset(L, -3);
+                    }
+                }
+                lua_rawseti(L, -2, i+1);
+            }
+            lua_pushinteger(L, ranges->length());
+            // Clear highlights (could also be prevented by tweaking "ldomXRange( const ldomWord & word )"
+            // so it does not force-set _flags(1) which causes the drawing)
+            doc->text_view->clearSelection();
+            return 2;
+        }
+    }
+    return 0;
+}
+
 static int setBatteryState(lua_State *L) {
 	CreDocument *doc = (CreDocument*) luaL_checkudata(L, 1, "credocument");
 	int state = luaL_checkint(L, 2);
@@ -3849,6 +4055,9 @@ static int renderImageData(lua_State *L) {
     else if ( lua_isstring(L, 1) ) {
         idata = (const char*)lua_tolstring(L, 1, &size);
     }
+    else {
+        return luaL_argerror(L, 1, "expected light userdata or string");
+    }
     LVStreamRef stream = LVCreateMemoryStream((void*)idata, size);
     LVImageSourceRef img = LVCreateStreamImageSource(stream);
     if ( img.isNull() )
@@ -3931,6 +4140,27 @@ static int freeImage(lua_State *L) {
     return 0;
 }
 
+static int getBalancedHTML(lua_State *L) {
+    size_t size;
+    const char * data = (const char*)lua_tolstring(L, 1, &size);
+    int wflags = (int)luaL_optint(L, 2, 0);
+    LVStreamRef stream = LVCreateMemoryStream((void*)data, size);
+    lString8 html;
+    if ( getBalancedHTML(stream, html, wflags) ) {
+        lua_pushstring(L, html.c_str());
+        return 1;
+    }
+    return 0;
+}
+
+
+static bool skip_teardown = false;
+
+static int setSkipTearDown(lua_State *L) {
+    skip_teardown = lua_toboolean(L, 1);
+    return 0;
+}
+
 static const struct luaL_Reg cre_func[] = {
     {"initCache", initCache},
     {"initHyphDict", initHyphDict},
@@ -3954,7 +4184,10 @@ static const struct luaL_Reg cre_func[] = {
     {"getHyphenationForWord", getHyphenationForWord},
     {"softHyphenateText", softHyphenateText},
     {"renderImageData", renderImageData},
+    {"getBalancedHTML", getBalancedHTML},
     {"smoothScaleBlitBuffer", smoothScaleBlitBuffer},
+    {"setImageReplacementChar", setImageReplacementChar},
+    {"setSkipTearDown", setSkipTearDown},
     {NULL, NULL}
 };
 
@@ -3966,6 +4199,7 @@ static const struct luaL_Reg credocument_meth[] = {
     {"getStringProperty", getStringProperty},
     {"getDocumentFormat", getDocumentFormat},
     {"getDocumentProps", getDocumentProps},
+    {"setAltDocumentProp", setAltDocumentProp},
     {"getDocumentRenderingHash", getDocumentRenderingHash},
     {"canBePartiallyRerendered", canBePartiallyRerendered},
     {"isPartialRerenderingEnabled", isPartialRerenderingEnabled},
@@ -4007,6 +4241,7 @@ static const struct luaL_Reg credocument_meth[] = {
     {"setViewMode", setViewMode},
     {"setViewDimen", setViewDimen},
     {"setHeaderInfo", setHeaderInfo},
+    {"setPageInfoOverride", setPageInfoOverride},
     {"setHeaderFont", setHeaderFont},
     {"setHeaderProgressMarks", setHeaderProgressMarks},
     {"setFontFace", setFontFace},
@@ -4043,6 +4278,7 @@ static const struct luaL_Reg credocument_meth[] = {
     {"drawCurrentPage", drawCurrentPage},
     //{"drawCoverPage", drawCoverPage},
     {"findText", findText},
+    {"findAllText", findAllText},
     {"isXPointerInCurrentPage", isXPointerInCurrentPage},
     {"isXPointerInDocument", isXPointerInDocument},
     {"getLinkFromPosition", getLinkFromPosition},
@@ -4122,6 +4358,8 @@ int luaopen_cre(lua_State *L) {
 
 // Library finalizer (c.f., dlopen(3)). This serves no real purpose except making Valgrind's output slightly more useful.
 __attribute__((destructor)) static void cre_teardown(void) {
+    if (skip_teardown)
+        return;
     if (cre_callback_forwarder) {
         delete cre_callback_forwarder;
         cre_callback_forwarder = NULL;

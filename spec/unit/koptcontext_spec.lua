@@ -1,7 +1,7 @@
 local ffi = require("ffi")
 local KOPTContext = require("ffi/koptcontext")
 local mupdf = require("ffi/mupdf")
-local k2pdfopt = ffi.load("libs/libk2pdfopt.so.2")
+local k2pdfopt = ffi.loadlib("k2pdfopt", "2")
 
 local sample_pdf = "spec/base/unit/data/Alice.pdf"
 local paper_pdf = "spec/base/unit/data/Paper.pdf"
@@ -150,7 +150,7 @@ describe("KOPTContext module", function()
         page:toBmp(kc.src, 300)
         page:close()
         k2pdfopt.k2pdfopt_reflow_bmp(kc)
-        local word = kc:getTOCRWord("dst", 280, 60, 100, 40, "data", "eng", 3, 0, 0)
+        local word = kc:getTOCRWord("dst", 280, 60, 100, 40, "data/tessdata", "eng", 3, 0, 0, 300)
         assert.are_same(word, "Alice")
         kc:freeOCR()
     end)

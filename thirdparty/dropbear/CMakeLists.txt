@@ -1,51 +1,77 @@
-cmake_minimum_required(VERSION 3.5.1)
-project(dropbear LANGUAGES)
-
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_LIST_DIR}/../cmake_modules")
-include("koreader_thirdparty_common")
-
-assert_var_defined(CC)
-assert_var_defined(CPPFLAGS)
-assert_var_defined(CFLAGS)
-assert_var_defined(LIBS)
-assert_var_defined(LDFLAGS)
-assert_var_defined(CHOST)
-
-ep_get_source_dir(SOURCE_DIR)
-
-list(APPEND PATCH_CMD COMMAND ${KO_PATCH} ${CMAKE_CURRENT_SOURCE_DIR}/dropbear-2018.76-kindle-nopasswd-hack.patch)
-list(APPEND PATCH_CMD COMMAND ${KO_PATCH} ${CMAKE_CURRENT_SOURCE_DIR}/dropbear-2018.76-kindle-pubkey-hack.patch)
-list(APPEND PATCH_CMD COMMAND ${KO_PATCH} ${CMAKE_CURRENT_SOURCE_DIR}/dropbear-2018.76-kindle-pubkey-gen-hack.patch)
-list(APPEND PATCH_CMD COMMAND ${KO_PATCH} ${CMAKE_CURRENT_SOURCE_DIR}/dropbear-2018.76-kindle-nochdir-hack.patch)
-list(APPEND PATCH_CMD COMMAND ${KO_PATCH} ${CMAKE_CURRENT_SOURCE_DIR}/dropbear-2018.76-kindle-options-hack.patch)
-list(APPEND PATCH_CMD COMMAND ${KO_PATCH} ${CMAKE_CURRENT_SOURCE_DIR}/dropbear-2018.76-upstream-fixes.patch)
 # This is pretty much platform-specific... Hard-coded paths and all that...
-if(DEFINED ENV{KOBO})
-    list(APPEND PATCH_CMD COMMAND ${KO_PATCH} ${CMAKE_CURRENT_SOURCE_DIR}/dropbear-2018.76-scp-command-hack-kobo.patch)
-elseif(DEFINED ENV{KINDLE})
-    list(APPEND PATCH_CMD COMMAND ${KO_PATCH} ${CMAKE_CURRENT_SOURCE_DIR}/dropbear-2018.76-scp-command-hack-kindle.patch)
-elseif(DEFINED ENV{CERVANTES})
-    list(APPEND PATCH_CMD COMMAND ${KO_PATCH} ${CMAKE_CURRENT_SOURCE_DIR}/dropbear-2018.76-scp-command-hack-cervantes.patch)
-elseif(DEFINED ENV{POCKETBOOK})
-    list(APPEND PATCH_CMD COMMAND ${KO_PATCH} ${CMAKE_CURRENT_SOURCE_DIR}/dropbear-2018.76-scp-command-hack-pocketbook.patch)
+if(CERVANTES)
+    set(PLATFORM_KOREADER_DIR "/mnt/private/koreader")
+elseif(KINDLE)
+    set(PLATFORM_KOREADER_DIR "/mnt/us/koreader")
+elseif(KOBO)
+    set(PLATFORM_KOREADER_DIR "/mnt/onboard/.adds/koreader")
+elseif(POCKETBOOK)
+    set(PLATFORM_KOREADER_DIR "/mnt/ext1/applications/koreader")
+else()
+    set(PLATFORM_KOREADER_DIR)
 endif()
-list(APPEND PATCH_CMD COMMAND autoreconf -fi)
 
-set(CFG_ENV_VAR "CC=${CC}" "CPPFLAGS=${CPPFLAGS} -I${SOURCE_DIR}" "CFLAGS=${CFLAGS}" "LIBS=${LIBS}" "LDFLAGS=${LDFLAGS}")
-set(CFG_OPTS --host=${CHOST} --disable-lastlog --enable-zlib --enable-openpty --enable-shadow --enable-syslog --disable-harden)
-set(CFG_CMD env ${CFG_ENV_VAR} ${SOURCE_DIR}/configure ${CFG_OPTS})
+# Increase the number for higher verbosity.
+set(DEBUG_TRACE 1)
+set(DROPBEAR_DEFPORT "2222")
+set(DROPBEAR_SMALL_CODE TRUE)
+set(DROPBEAR_X11FWD TRUE)
+set(INETD_MODE FALSE)
+# NOTE: Consider enabling this to debug our crazy scp/sftp hack...
+set(LOG_COMMANDS FALSE)
+# Paths.
+set(DEFAULT_PATH "/sbin:/usr/sbin:/bin:/usr/bin")
+set(DROPBEAR_PIDFILE "settings/SSH/dropbear.pid")
+if(PLATFORM_KOREADER_DIR)
+    set(DBSCP_PATH ${PLATFORM_KOREADER_DIR})
+    set(SFTPSERVER_PATH "${PLATFORM_KOREADER_DIR}/sftp-server")
+endif()
+# Keys.
+set(DSS_PRIV_FILENAME "settings/SSH/dropbear_dss_host_key")
+set(RSA_PRIV_FILENAME "settings/SSH/dropbear_rsa_host_key")
+set(ECDSA_PRIV_FILENAME "settings/SSH/dropbear_ecdsa_host_key")
 
-set(BUILD_CMD ${KO_MAKE_RECURSIVE} -j${PARALLEL_JOBS} strip PROGRAMS=dropbear)
+configure_file(localoptions.h.cmake ${CMAKE_CURRENT_BINARY_DIR}/localoptions.h ESCAPE_QUOTES)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/localoptions.h)
 
-include(ExternalProject)
-set(DROPBEAR_VER "2018.76")
-ExternalProject_Add(
-    ${PROJECT_NAME}
-    URL http://deb.debian.org/debian/pool/main/d/dropbear/dropbear_${DROPBEAR_VER}.orig.tar.bz2
-    URL_MD5 c3912f7fcdcc57c99937e4a79480d2c2
-    DOWNLOAD_DIR ${KO_DOWNLOAD_DIR}
-    PATCH_COMMAND ${PATCH_CMD}
+list(APPEND PATCH_FILES
+    dbscp-path.patch
+    nochdir-hack.patch
+    nopasswd-hack.patch
+    pubkey-hack.patch
+    reduce_build_verbosity.patch
+)
+
+if(ANDROID)
+    set(LIBS -static)
+else()
+    set(LIBS)
+endif()
+
+list(APPEND CFG_CMD COMMAND env)
+append_autotools_vars(CFG_CMD)
+list(APPEND CFG_CMD
+    ${SOURCE_DIR}/configure --host=${CHOST}
+    --disable-harden
+    --disable-lastlog
+    --enable-openpty
+    --enable-shadow
+    --enable-syslog
+    --enable-zlib
+    --with-zlib=${STAGING_DIR}
+)
+list(APPEND CFG_CMD COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_BINARY_DIR}/localoptions.h localoptions.h)
+
+list(APPEND BUILD_CMD COMMAND make strip PROGRAMS=dropbear)
+
+append_binary_install_command(INSTALL_CMD dropbear)
+
+external_project(
+    DOWNLOAD URL bb72335b40c90397cb1c182143524800
+    https://github.com/mkj/dropbear/archive/refs/tags/DROPBEAR_2024.86.tar.gz
+    PATCH_FILES ${PATCH_FILES}
     CONFIGURE_COMMAND ${CFG_CMD}
+    BUILD_DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/localoptions.h
     BUILD_COMMAND ${BUILD_CMD}
-    INSTALL_COMMAND ""
+    INSTALL_COMMAND ${INSTALL_CMD}
 )

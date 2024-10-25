@@ -1,73 +1,42 @@
-cmake_minimum_required(VERSION 3.5.1)
-project(glib LANGUAGES)
-
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_LIST_DIR}/../cmake_modules")
-include("koreader_thirdparty_common")
-include("koreader_thirdparty_git")
-
-assert_var_defined(CC)
-assert_var_defined(CHOST)
-assert_var_defined(CFLAGS)
-assert_var_defined(LDFLAGS)
-assert_var_defined(HOST_OPTS)
-assert_var_defined(GETTEXT_DIR)
-assert_var_defined(LIBICONV_DIR)
-assert_var_defined(WITH_LIBICONV)
-
-ep_get_source_dir(SOURCE_DIR)
-ep_get_binary_dir(BINARY_DIR)
-
-# We only care about `libglib-2.0.a`.
-list(APPEND PATCH_CMD COMMAND ${KO_PATCH} ${CMAKE_CURRENT_SOURCE_DIR}/glib-libglib-only.patch)
-
-# Android makes Linux syscalls hard to get to... Fix pilfered from Python.
-if(DEFINED ENV{ANDROID})
-    list(APPEND PATCH_CMD COMMAND ${KO_PATCH} ${CMAKE_CURRENT_SOURCE_DIR}/glib-2.58.2-android-linux-syscalls.patch)
+list(APPEND PATCH_FILES
+    # We only care about `libglib-2.0.a`.
+    libglib-only.patch
+)
+if(LEGACY OR POCKETBOOK)
+    # Avoid pulling-in `__sched_cpucount@GLIBC_2.6`, `eventfd@GLIBC_2.7`,
+    # `pipe2@GLIBC_2.9` or `mkostemp@GLIBC_2.7`.
+    list(APPEND PATCH_FILES no_glibc_2.6_or_above_symbols.patch)
 endif()
 
-list(APPEND PATCH_CMD COMMAND env NOCONFIGURE=1 ./autogen.sh)
-
-# Autotools needs some hints when x-compiling
-list(APPEND gen_arm_config "glib_cv_stack_grows=no")
-list(APPEND gen_arm_config "glib_cv_uscore=no")
-# In order to support legacy PocketBook 4.x firmware we should get rid of eventfd@GLIBC_2.7 and pipe2@GLIBC_2.9
-if(DEFINED ENV{LEGACY} OR DEFINED ENV{POCKETBOOK})
-    list(APPEND gen_arm_config "glib_cv_eventfd=no")
-    list(APPEND gen_arm_config "ac_cv_func_pipe2=no")
-    # As well as mkostemp@GLIBC_2.7
-    list(APPEND gen_arm_config "ac_cv_func_mkostemp=no")
-endif()
-if(DEFINED ENV{ANDROID})
-    # disable getpwuid, getgrgid and timegm for > android-12
-    list(APPEND gen_arm_config "ac_cv_func_posix_getpwuid_r=no")
-    list(APPEND gen_arm_config "ac_cv_func_posix_getgrgid_r=no")
-    list(APPEND gen_arm_config "ac_cv_func_getpwuid_r=no")
-    list(APPEND gen_arm_config "ac_cv_func_getgrgid_r=no")
-    list(APPEND gen_arm_config "ac_cv_func_timegm=no")
+if(ANDROID OR APPLE)
+    set(ICONV gnu)
+else()
+    set(ICONV libc)
 endif()
 
-list(APPEND CFG_CMD COMMAND sh -c "printf '%s\\n' \"$@\" >arm_cache.conf" -- ${gen_arm_config})
-
-set(CFG_ENV_VAR "CC=${CC}" "AR=${AR}" "RANLIB=${RANLIB}")
-set(CFG_ENV_VAR ${CFG_ENV_VAR} "CFLAGS=${CFLAGS} -I${LIBICONV_DIR}/include -I${GETTEXT_DIR}/include" "LDFLAGS=${LDFLAGS} -L${GETTEXT_DIR}/lib -L${LIBICONV_DIR}/lib")
-set(CFG_OPTS --with-libiconv=${WITH_LIBICONV} --with-threads=posix --prefix=${BINARY_DIR} --libdir=${BINARY_DIR}/lib --disable-libelf --with-pcre=internal --disable-selinux --disable-compile-warnings --enable-libmount=no)
-set(CFG_OPTS ${CFG_OPTS} --enable-static=true --enable-shared=false)
-set(CFG_OPTS ${CFG_OPTS} --host=${CHOST} ${HOST_OPTS})
-list(APPEND CFG_CMD COMMAND env ${CFG_ENV_VAR} ${SOURCE_DIR}/configure ${CFG_OPTS})
-
-ko_write_gitclone_script(
-    GIT_CLONE_SCRIPT_FILENAME
-    https://github.com/GNOME/glib.git
-    2.58.3
+list(APPEND CFG_CMD COMMAND
+    ${MESON_SETUP} --default-library=static
+    -Dglib_assert=false
+    -Dglib_debug=disabled
+    -Dtests=false
+    -Dxattr=false
     ${SOURCE_DIR}
 )
 
-include(ExternalProject)
-ExternalProject_Add(
-    ${PROJECT_NAME}
-    DOWNLOAD_COMMAND ${CMAKE_COMMAND} -P ${GIT_CLONE_SCRIPT_FILENAME}
-    PATCH_COMMAND ${PATCH_CMD}
+list(APPEND BUILD_CMD COMMAND ninja glib/libglib-2.0.a)
+
+list(APPEND INSTALL_CMD COMMAND ${MESON_INSTALL} --tags devel)
+# Don't install the pkg-config entry:
+# - sdcv is the only user, and needs to be manually coaxed into using our GLib anyway.
+# - when building SDL2 for the AppImage, IBus headers include some GObject headers,
+#   which our patched version does not include.
+list(APPEND INSTALL_CMD COMMAND rm -f ${STAGING_DIR}/lib/pkgconfig/glib-2.0.pc)
+
+external_project(
+    DOWNLOAD URL d101f1acab6805d4d6d3104e9634b8e3
+    https://download.gnome.org/sources/glib/2.82/glib-2.82.1.tar.xz
+    PATCH_FILES ${PATCH_FILES}
     CONFIGURE_COMMAND ${CFG_CMD}
-    BUILD_COMMAND ${KO_MAKE_RECURSIVE} -j${PARALLEL_JOBS} -C glib
-    INSTALL_COMMAND ${KO_MAKE_RECURSIVE} -j${PARALLEL_JOBS} -C glib install
+    BUILD_COMMAND ${BUILD_CMD}
+    INSTALL_COMMAND ${INSTALL_CMD}
 )
